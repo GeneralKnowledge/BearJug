@@ -50,7 +50,7 @@ open('/out/collector-ca.pem', 'wb').write(cert.public_bytes(serialization.Encodi
 PY
 "
 docker rm -f bj-collector >/dev/null 2>&1 || true
-docker run -d --name bj-collector --network $COLL_NET --ip $COLL_IP -v bj-collector-data:/data \
+docker run -d --restart unless-stopped --name bj-collector --network $COLL_NET --ip $COLL_IP -v bj-collector-data:/data \
   bearjug/collector-ci bearjug-collector --data /data/store serve --host 0.0.0.0 --port 8443 \
   --tls-cert /data/tls.crt --tls-key /data/tls.key >/dev/null
 chown -R "${SUDO_USER:-root}" "$SECRETS"

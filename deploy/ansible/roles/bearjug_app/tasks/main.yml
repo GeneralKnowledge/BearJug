@@ -7,23 +7,43 @@
     update_cache: true
     cache_valid_time: 3600
 
-- name: BearJug source directory
+# The source travels as a reproducible tarball (see files/pack_source.py), so a
+# second run with the same code changes nothing, and files removed from the
+# repository don't linger on the host.
+- name: Pack the BearJug source
+  ansible.builtin.command: >-
+    python3 {{ role_path }}/files/pack_source.py {{ bearjug_source_dir }}
+    {{ bearjug_source_dir }}/dist/bearjug-src.tar
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+
+- name: BearJug directory
   ansible.builtin.file:
-    path: "{{ bearjug_prefix }}/src"
+    path: "{{ bearjug_prefix }}"
     state: directory
     owner: root
     group: root
     mode: "0755"
 
-- name: BearJug source
+- name: BearJug source tarball
   ansible.builtin.copy:
-    src: "{{ bearjug_source_dir }}/{{ item }}"
-    dest: "{{ bearjug_prefix }}/src/"
+    src: "{{ bearjug_source_dir }}/dist/bearjug-src.tar"
+    dest: "{{ bearjug_prefix }}/bearjug-src.tar"
     owner: root
     group: root
-    mode: u=rwX,go=rX
-  loop: [src, pyproject.toml, README.md, LICENSE, NOTICE]
+    mode: "0644"
   register: bearjug_source
+
+- name: Unpack the BearJug source
+  ansible.builtin.shell: |
+    set -e
+    rm -rf {{ bearjug_prefix }}/src
+    install -d -o root -g root -m 0755 {{ bearjug_prefix }}/src
+    tar -xf {{ bearjug_prefix }}/bearjug-src.tar -C {{ bearjug_prefix }}/src --no-same-owner
+  when: bearjug_source.changed
+  changed_when: true
 
 - name: BearJug virtualenv
   ansible.builtin.command: python3 -m venv {{ bearjug_prefix }}/venv
