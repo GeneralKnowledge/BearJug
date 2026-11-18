@@ -3,30 +3,40 @@
 Deceptive Access is part of the initial product, not a later experimental
 feature. See [design/deceptive-access.md](design/deceptive-access.md).
 
-Every PR must keep the Deceptive Access safety constraints intact: no real
-shell or host authentication; synthetic secrets are never valid and never
-resemble usable ones; all outbound actions are simulated and recorded.
+> **Defining engineering rule:** make the deception as convincing as possible
+> to the attacker, while making the real infrastructure as inaccessible as
+> possible to them.
+
+Every PR keeps the safety constraints intact (no real shell or host
+authentication; synthetic secrets never valid and never real-shaped; all
+outbound actions simulated and recorded), and from PR 5 onward every PR must
+pass the security boundary test suite.
 
 ## PR plan
 
-| PR | Responsibility | Notes |
+| PR | Responsibility | Scope |
 |---|---|---|
-| 1–2 | Project foundation and event schema | Event schema includes the Deceptive Access event types (auth decisions with rule, session lifecycle, commands, file access, simulated outbound, privesc, persistence, secret access/use) |
-| 3–4 | Ingestion and database | Store full sessions, not just login attempts |
-| 5 | Sensor agent and Cowrie integration | Cowrie in shell (emulated) mode only; proxy backend off; SSH forwarding off; egress denied except to collector; unprivileged container |
-| 6 | Deceptive authentication engine | Custom Cowrie auth class driven by the AITO credential policy: synthetic account profiles, exact-match and accept-after-N rules, per-source consistency, decision + rule recorded. No PAM or host auth. Deterministic tests for the policy |
-| 7 | Synthetic Linux environment | Deception profile format and compiler to Cowrie artefacts (filesystem, file contents, command outputs). Level 1: users, processes, basic commands, all consistent with one profile. Replace Cowrie's real-fetch `wget`/`curl` with simulated handlers |
-| 8 | Interactive session recording | Structured per-command events plus TTY replay, shipped to the collector. Completes Level 1 (MVP) |
-| 9 | Fake infrastructure and credentials | Level 2 and first Level 3 pieces: apps, `.env`, Git repos, DB contents, SSH keys, cron/services, cloud config, Docker, simulated DB/cloud/SSH clients. Synthetic-secret validator and CI secret scan. Profile generator for multiple distinct personalities |
-| 10 | Behavioural intelligence | Session features, behavioural fingerprints, post-compromise behaviour metrics |
-| 11 | Campaign correlation | Link sessions across sources and sensors using fingerprints and decoy-secret reuse |
-| 12 | Dashboard investigation tools | Session replay, per-attacker timelines, credential-to-behaviour views |
-| 13+ | Distributed sensors and research | Multiple sensors with distinct profiles, profile rotation, remaining Level 3 (simulated lateral movement across fictional hosts, long-running sessions), research datasets |
+| 1–2 | Foundation and canonical event schema | Repo foundation; one canonical schema covering raw evidence, normalised events and intelligence, including the Deceptive Access event types |
+| 3–4 | Ingestion, storage and evidence integrity | Collector ingestion; three-tier storage; append-only, hashed raw evidence; password and upload retention, access and quarantine policy |
+| 5 | Cowrie integration and security boundary tests | Isolated sensor container (emulated shell only, proxy off, forwarding off, real-fetch `wget`/`curl` replaced); default-deny egress firewall; executable security boundary test suite in CI |
+| 6 | Exact-match synthetic authentication | AITO auth class: exact synthetic matches only, per-profile credential sets, consistent across reconnects; experimental policies possible only when explicitly labelled in event data |
+| 7 | Profile-driven Linux simulation | Profile data model, compiler to Cowrie artefacts, consistency checks; Level 1 shell where every command tells the same story |
+| 8 | Full interactive session recording | TTY evidence plus normalised events with timing and outcomes. **MVP release gate** passes here |
+| 9 | Fictional infrastructure and decoy secrets | Level 2 and first Level 3: apps, decoy `.env`, Git repos, DB contents, SSH keys, services, Docker, simulated DB/cloud/SSH clients; secret validator and CI scan; profile generator for distinct environments |
+| 10–11 | Behavioural intelligence and campaign correlation | Command timing, manual vs automated, search patterns, persistence and discovery attempts, credential and decoy-secret reuse, returning visitors; fingerprints and campaigns |
+| 12 | Investigation dashboard | Session replay, attacker timelines, credential-to-behaviour views, links back to raw evidence |
+| 13+ | Distributed sensors and research | Multiple sensors with distinct linked profiles forming a fictional network, profile rotation, remaining Level 3, research datasets |
 
-## Milestones
+## Release gate (MVP)
 
-- **MVP (after PR 8):** an attacker who guesses a synthetic credential gets a
-  consistent Level 1 fake server, and the whole session lands in AITO.
-- **Believable server (after PR 9):** Level 2 profiles with synthetic secrets
-  that attackers try to use, all uses simulated and recorded.
-- **Intelligence (after PR 12):** fingerprints, campaigns, and investigation UI.
+The first successful end-to-end test is a formal release gate. An external
+test client connects, authenticates with a synthetic credential, explores the
+fake server, attempts a simulated download, and produces a complete
+investigation record, with no external connection and no real command
+execution. Details in the design doc, section 9.
+
+## Sequencing
+
+1. Event schema, isolated sensor and collector working (PR 1–5).
+2. Prove fake login to fake shell, end to end (PR 6–8, release gate).
+3. Then add believable infrastructure and intelligence (PR 9 onward).

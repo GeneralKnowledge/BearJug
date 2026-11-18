@@ -1,12 +1,17 @@
 # Deceptive Access
 
-Status: proposed, core feature of the initial product
+Status: architectural baseline, revised after review
 Applies to: AveDeus sensors, AITO intelligence layer
+
+> **Defining engineering rule of BearJug**
+>
+> Make the deception as convincing as possible to the attacker, while making
+> the real infrastructure as inaccessible as possible to them.
 
 ## 1. Summary
 
 Most SSH honeypots record failed brute-force attempts and stop there. Deceptive
-Access goes one step further: when an attacker guesses one of the sensor's
+Access goes one step further: when an attacker presents one of a sensor's
 **synthetic** credentials, they are let in to a **completely simulated server**.
 
 They get the *experience* of gaining access. They never get access to a real
@@ -29,67 +34,102 @@ The attacker believes they have root. In reality:
 - every action is recorded.
 
 The value to AITO is the dataset this produces: **post-compromise behaviour**,
-meaning what attackers do in the minutes after they think they have broken in.
+meaning what attackers do once they believe they have broken in.
 
-## 2. Safety constraints (non-negotiable)
+### The longer-term opportunity
 
-These apply to every PR in the roadmap. A change that weakens any of them is
-not mergeable.
+Each sensor becomes a fictional environment with its own identity, and sensors
+can together form a fictional network. An attacker might:
+
+1. discover a fake web server;
+2. find credentials in a fake deployment file;
+3. use them to access a fake database;
+4. discover another fictional machine;
+5. attempt to download malware or establish persistence;
+6. return days later and continue exploring.
+
+AITO records the entire chain and compares behaviour across sensors to identify
+recurring techniques and campaigns. That is a far more valuable research
+platform than a collection of IP addresses and failed passwords.
+
+## 2. Safety constraints and the security boundary
+
+These apply to every PR. A change that weakens any of them is not mergeable.
+They are **enforced by executable tests and by the network**, not only by
+configuration.
+
+### 2.1 Constraints
 
 1. **No real shell, no real host authentication.**
    - Credential decisions are made by the AITO credential policy inside the
      honeypot process. They never touch PAM, `/etc/shadow`, `sshd`, LDAP or any
-     other real authentication system on the host.
+     other real authentication system.
    - Commands are interpreted by Cowrie's emulated shell and AITO's simulated
-     command handlers. Nothing an attacker types is ever passed to `exec`,
-     `subprocess`, `os.system`, a real container, or any other real execution
-     path.
-   - Cowrie's proxy backend (which relays sessions to a real backend host) is
-     not used. The shell backend is the only supported mode.
-   - The honeypot runs as an unprivileged user in its own container, with no
-     host mounts other than its own log/output volume.
+     command handlers. Attacker input is never passed to `exec`, `subprocess`,
+     `os.system`, a real container, or any other real execution path.
+   - Cowrie's proxy backend is not used. The emulated shell backend is the only
+     supported mode.
+   - Synthetic accounts exist only in the credential policy. They are never
+     created as real users on the sensor host.
 
 2. **Synthetic secrets are never valid and never resemble usable ones.**
    - Every credential, key, token, password and connection string in a
-     deception profile is generated synthetic data that grants nothing,
-     anywhere.
-   - Synthetic secrets must not match real provider formats closely enough to
-     be mistaken for real ones. For example, no `AKIA…`-shaped AWS key IDs, no
-     `ghp_…` GitHub tokens, no valid-looking PEM private keys that parse as real
-     keys. Values carry an explicit decoy marker such as `FAKE_AITO_` or
-     `aito-decoy-`.
-   - The profile generator refuses to emit a value that matches a known secret
-     pattern, and CI runs a secret scanner over generated profiles and fixtures.
-   - The synthetic SSH accounts exist only in the honeypot's credential policy
-     file. They are never created as real users on the sensor host.
+     profile grants nothing, anywhere.
+   - Values must not match real provider formats closely enough to be mistaken
+     for real ones: no `AKIA…`-shaped AWS key IDs, no `ghp_…` tokens, no PEM
+     blocks that parse as real keys. Values carry an explicit decoy marker such
+     as `FAKE_AITO_` or `aito-decoy-`.
+   - The profile tooling refuses to emit a value matching a known secret
+     pattern, and CI runs a secret scanner over profiles and fixtures.
 
 3. **All outbound actions are simulated and recorded.**
    - `wget`, `curl`, `tftp`, `ftpget`, `scp`/`sftp` to remote hosts, `ssh` to
      other hosts, `nc`, `git clone`, package managers and database/cloud
-     clients return locally simulated responses. The requested URL, host,
-     port and arguments are recorded; no connection is made.
-   - Cowrie's default `wget`/`curl` behaviour of fetching the real URL is
-     replaced with simulated handlers. Payload *requests* are recorded; payloads
-     are not fetched by the sensor.
-   - SSH port forwarding (`direct-tcpip`) is disabled, so the sensor cannot be
-     used as a relay.
-   - Defence in depth: the sensor's network egress is denied by default, with a
-     single allow rule to the private AITO collector.
+     clients return locally simulated responses. The requested URL, host, port
+     and arguments are recorded; no connection is made.
+   - Cowrie's default real-fetch `wget`/`curl` behaviour is replaced.
+   - SSH port forwarding (`direct-tcpip`, `tcpip-forward`) is disabled.
 
-4. **Deterministic, isolated acceptance.**
-   - Whether a credential attempt succeeds depends only on the credential
-     policy and the attempt history the honeypot has recorded. Given the same
-     policy, seed and history, the decision is the same.
+4. **Deterministic, isolated acceptance.** See section 4.
 
-5. **Everything is recorded.**
-   - Failed attempts, accepted attempts, every command, every simulated
-     outbound request, and session timing all reach the intelligence collector.
+5. **Everything is recorded**, as raw evidence first (section 8).
+
+### 2.2 Isolation (defence in depth)
+
+The network and the container must hold the boundary **even if Cowrie or an
+AITO plugin is misconfigured**.
+
+- The honeypot runs as an unprivileged user in its own container, with a
+  read-only root filesystem, dropped capabilities and no-new-privileges.
+- No host mounts other than its own output volume and the upload quarantine
+  directory. No Docker socket. No access to collector internals, credentials
+  or configuration.
+- Network egress from the honeypot is denied by default at the firewall. The
+  only allowed path is from a separate shipping component to the private
+  collector endpoint; the honeypot process itself has no route out.
+- Inbound is limited to the SSH listener.
+
+### 2.3 Security boundary tests
+
+PR 5 introduces a security test suite that runs in CI against a real sensor
+container. Each guarantee is a test that must pass:
+
+| Guarantee | Test |
+|---|---|
+| Simulated `curl` cannot contact an external server | Run `curl http://<test-sink>/` in a session; assert the sink received nothing and a `outbound.simulated` event was recorded |
+| Simulated `wget` cannot retrieve a payload | Run `wget` against a test sink serving a file; assert no request at the sink and no payload on disk |
+| SSH forwarding cannot establish a connection | Open `direct-tcpip` and remote forward channels from the client; assert they are refused and nothing reaches the sink |
+| Commands cannot invoke host processes | Run commands that would create marker files or processes if executed for real (including shell metacharacters, `$(…)`, backticks, `bash -c`, `python -c`); assert no host-side effect |
+| Uploaded files cannot escape quarantine | SFTP/SCP uploads with path traversal (`../`, absolute paths, symlinks); assert files land only in quarantine, with sanitised names |
+| No access to host mounts, Docker socket or collector internals | From inside the honeypot container, assert the socket and host paths are absent and collector endpoints are unreachable from the honeypot process |
+| Egress firewall holds without Cowrie's help | With a deliberately misconfigured plugin that tries a real connection, assert the firewall blocks it |
+| Synthetic secrets are not real-shaped | Secret scanner over all profiles and fixtures reports nothing |
+
+A failing boundary test blocks merge.
 
 ## 3. Architecture
 
 ### Decision: Cowrie-centred deception with an AITO layer (option A)
-
-Two approaches were considered.
 
 | | A. Cowrie-centred (chosen) | B. Custom AITO shell emulator |
 |---|---|---|
@@ -102,12 +142,9 @@ Two approaches were considered.
 | Control over behaviour | Good via extension points | Full |
 
 **Cowrie handles the dangerous-facing parts**: the SSH protocol and shell
-emulation. **AITO supplies** the fictional server personality, synthetic
-credential policies, additional simulated services, event correlation and
-intelligence.
-
-Option B stays open as a long-term path if Cowrie's extension points become
-limiting, but it is not on the initial roadmap.
+emulation. **AITO supplies** the fictional server profile, synthetic credential
+policy, additional simulated services, event correlation and intelligence.
+Option B stays open as a long-term path but is not on the roadmap.
 
 ### Flow
 
@@ -116,9 +153,9 @@ flowchart TD
     A[Internet connection] --> B[SSH honeypot - Cowrie]
     B --> C[Credential attempt]
     C --> D{AITO credential policy}
-    D -->|Unknown / failed| E[Record failed attempt]
-    D -->|Synthetic credential accepted| F[Create fake session]
-    F --> G[Present simulated Linux system]
+    D -->|No exact synthetic match| E[Record failed attempt]
+    D -->|Exact synthetic match| F[Create fake session]
+    F --> G[Present profile-driven Linux system]
     G --> H[Interpret commands - emulator only]
     H --> I[Record behaviour]
     I --> J{Attacker action}
@@ -136,78 +173,98 @@ flowchart TD
 
 | Component | Responsibility | Built on |
 |---|---|---|
-| Credential policy engine | Decides accept/reject for each attempt from synthetic account profiles and policy rules | Custom Cowrie auth class |
-| Deception profile | One coherent fictional server: hostname, OS, kernel, users, filesystem, processes, services, network, files | AITO profile format |
-| Profile generator | Produces several internally consistent profiles so sensors don't all look identical | AITO tool |
-| Profile compiler | Turns a profile into Cowrie artefacts (filesystem pickle, honeyfs contents, txtcmds, config) | AITO tool |
-| Simulated command handlers | Commands Cowrie doesn't cover, or must answer from the profile (`docker`, `psql`, `aws`, `systemctl`, outbound tools) | Cowrie command plugins |
-| Session recorder | Captures the full session as structured events plus TTY replay | Cowrie output plugin + TTY logs |
-| Intelligence collector | Receives events, stores them, derives fingerprints and campaigns | AITO ingestion + database |
+| Credential policy engine | Accept/reject each attempt by exact match against the active profile's synthetic accounts | Custom Cowrie auth class |
+| Deception profile | Complete fictional server specification (section 5) | AITO profile data model |
+| Profile generator | Produces several distinct, internally consistent profiles | AITO tool |
+| Profile compiler | Turns a profile into Cowrie artefacts (filesystem, file contents, command outputs, config) | AITO tool |
+| Simulated command handlers | Commands that must answer from the profile (`docker`, `psql`, `aws`, `systemctl`, outbound tools) | Cowrie command plugins |
+| Session recorder | Full session as raw evidence plus normalised events | Cowrie output plugin + TTY logs |
+| Intelligence collector | Stores evidence, normalises events, derives intelligence | AITO ingestion + database |
 
 ## 4. Credential policy
 
-Credentials are not accepted indiscriminately. Each profile defines **synthetic
-account profiles**:
+### 4.1 Production rule: exact synthetic matches only
 
-| Username | Password | Fake identity |
+A login succeeds **only** when the username and password exactly match a
+synthetic account in the sensor's active profile. Trying the same username
+repeatedly never grants access. This keeps "the attacker discovered a
+credential" a real, measurable event.
+
+- **Exact synthetic username/password match.** No other rule grants access in
+  the default policy.
+- **Per-profile credential sets.** Each fictional server profile has its own
+  accounts and passwords. Two sensors running different profiles accept
+  different credentials.
+- **Consistent across reconnects.** The same credentials give the same result
+  every time, from any source, for as long as the profile is active. A
+  credential that worked yesterday still works today; one that failed still
+  fails.
+- **Deterministic and isolated.** The decision depends only on the profile's
+  credential set (and, for experiments, the declared experimental policy). It
+  never depends on the host's authentication system.
+
+Example synthetic accounts for a `prod-db-01` profile:
+
+| Username | Password | Fictional identity |
 |---|---|---|
-| root | configured synthetic password | System administrator |
-| admin | configured synthetic password | Administrator |
-| ubuntu | configured synthetic password | Default server user |
-| postgres | configured synthetic password | Database administrator |
-| deploy | configured synthetic password | Deployment account |
+| root | profile-specific synthetic password | System administrator |
+| ubuntu | profile-specific synthetic password | Default server user |
+| postgres | profile-specific synthetic password | Database administrator |
+| deploy | profile-specific synthetic password | Deployment account |
 
-The configured passwords are chosen per profile (typically from common weak
-passwords that bots actually try, so that discovery is realistic). They exist
-only in the policy file.
+Synthetic passwords are typically drawn from weak passwords that bots really
+try, so that discovery is realistic. They exist only in the profile.
 
-Policy rules are configurable per sensor, for example:
+### 4.2 Experimental policies
 
-- **exact match**: accept only the configured synthetic password for an account;
-- **accept after N attempts**: attempts 1 and 2 fail, attempt 3 with a matching
-  username succeeds;
-- **per-source limits**: an accepted source IP keeps the same credential on
-  reconnect, so the illusion is consistent;
-- **deny list**: usernames that must always fail.
+Other acceptance behaviours (for example "accept after N attempts") are **not**
+ordinary authentication rules. They may be enabled only as **controlled
+experimental policies**:
 
-Every decision is recorded with the rule that produced it, so analysis can
-separate "guessed the synthetic password" from "admitted by attempt-count rule".
+- explicitly configured per sensor with an experiment id, start and end date;
+- every `auth.attempt` and `session.start` event carries
+  `policy.kind = "experimental"` and the experiment id;
+- analysis separates experimental admissions from genuine credential discovery
+  by default;
+- still deterministic and isolated, and still bound by every safety constraint.
 
-Example policy (illustrative format):
+Every decision event records which rule produced it.
 
-```yaml
-policy:
-  seed: prod-db-01
-  accounts:
-    - username: root
-      password_ref: synthetic/root   # resolved from the profile, never a real secret
-      identity: System administrator
-    - username: deploy
-      password_ref: synthetic/deploy
-      identity: Deployment account
-  rules:
-    - type: exact_match
-    - type: accept_after_attempts
-      usernames: [root, admin, ubuntu]
-      attempts: 3
-  deny_usernames: []
-```
+## 5. Deception profiles as a first-class data model
 
-## 5. Levels of deceptive access
+A profile is a **complete fictional server specification**. Everything the
+attacker can observe is derived from it: `uname`, `ps`, `ls`, `cat`,
+`systemctl`, `ip addr`, `docker ps`, database clients and simulated network
+neighbours must all tell the same story.
 
-| Level | Name | Contents | Roadmap |
-|---|---|---|---|
-| 1 | Basic access (MVP) | Fake login succeeds; synthetic Linux shell; fake filesystem; simulated users and processes; basic Linux commands | PR 6–8 |
-| 2 | Believable server | Fake application deployments; synthetic `.env` files; fake Git repositories; fake database contents; simulated SSH keys; fake cron jobs and services; synthetic cloud configuration | PR 9 |
-| 3 | Interactive environment | Simulated privilege escalation; fake Docker containers; fake network discovery; simulated lateral movement; decoy databases and repositories; long-running interactive sessions | PR 9 and PR 13+ |
+### 5.1 Example: production database profile
 
-**Consistency is the key requirement.** If an attacker runs `ls`, `cd`, `cat`,
-`ps`, `uname`, `ip addr` and `docker ps`, every answer must describe the same
-fictional server. All of them are derived from one deception profile.
+| Property | Fictional value |
+|---|---|
+| Hostname | prod-db-01 |
+| OS | Ubuntu Server 24.04.1 LTS, kernel 6.8.0-45-generic |
+| Main service | PostgreSQL |
+| Users | root, ubuntu, postgres, deploy |
+| Applications | Customer portal |
+| Internal network | 10.20.0.0/24 |
+| Decoy files | `.env`, backups, Git repositories |
+| Decoy secrets | Marked synthetic values |
+| Credential set | Synthetic accounts for this profile only |
 
-## 6. Deception profiles
+### 5.2 What a profile specifies
 
-Each sensor is given one coherent fictional identity. Example: `prod-db-01`.
+- **Identity**: hostname, OS release, kernel, uptime model, timezone, locale.
+- **Accounts**: users, groups, home directories, shells, synthetic credentials.
+- **Filesystem**: tree, file contents and metadata (owners, modes, timestamps).
+- **Processes and services**: what `ps`, `top`, `systemctl`, `ss` and `netstat` show.
+- **Network**: interfaces, addresses, routes, DNS, and fictional neighbouring hosts.
+- **Applications**: deployments, config, containers, cron jobs, logs, Git repositories.
+- **Decoy data**: database contents, backups, history files.
+- **Decoy secrets**: marked synthetic values, each with a per-profile decoy id.
+- **Links**: references to other fictional machines (for example the DB host in
+  a web server's `.env`), so profiles can form a fictional network.
+
+Example layout for `prod-db-01`:
 
 ```
 /
@@ -232,19 +289,7 @@ Each sensor is given one coherent fictional identity. Example: `prod-db-01`.
     └── .env
 ```
 
-All contents are generated synthetic data. A profile defines at least:
-
-- identity: hostname, OS release, kernel version, uptime, timezone;
-- users and groups (consistent with `/etc/passwd`, `/home`, `who`, `last`);
-- filesystem tree and file contents;
-- processes and services (consistent with `ps`, `systemctl`, `top`, `ss`);
-- network: interfaces, addresses, routes, neighbouring fictional hosts;
-- applications, containers, cron jobs, history files;
-- synthetic secrets (see below).
-
-### Synthetic secrets
-
-The fake `.env` is deliberately interesting:
+Example decoy `.env`:
 
 ```
 APP_ENV=production
@@ -255,76 +300,130 @@ DB_PASSWORD=synthetic_fake_value
 AWS_ACCESS_KEY_ID=FAKE_AITO_ACCESS_KEY
 ```
 
-Rules (restating safety constraint 2):
-
-- values must never be valid credentials anywhere;
-- values must not resemble usable secrets closely enough to be mistaken for
-  real ones;
-- each value can carry a per-sensor decoy identifier, so that if it is seen
-  being used (for example against a simulated service on another sensor) the
-  use can be traced back to where it was found.
-
 When an attacker uses a found secret, for example `psql -h 10.20.0.15` or
-`aws s3 ls`, the simulated command handler answers locally from the profile and
-records the attempt. No connection leaves the sensor.
+`aws s3 ls`, the simulated handler answers from the profile and records the
+attempt. No connection leaves the sensor. Because decoy secrets carry a decoy
+id, their reuse on another sensor links the two sessions.
 
-### Profile generator
+### 5.3 Generator and validation
 
-The network should not look like the same honeypot repeated everywhere. The
-generator produces several internally consistent profiles (for example a
-database server, a CI runner, a web frontend, a staging box) from templates and
-a seed. Same seed, same profile. The generator validates each profile for
-internal consistency and runs the synthetic-secret checks before it can be
-deployed.
+The profile generator builds whole fictional environments, not isolated fake
+files: several distinct server types (database, web frontend, CI runner,
+staging box) from templates and a seed. Same seed, same profile. Before a
+profile can be deployed it must pass:
 
-## 7. Intelligence
+- **consistency checks**: users, processes, services, network and files agree
+  with each other;
+- **secret checks**: all decoy secrets are marked and none match real formats;
+- **distinctness checks**: sensors in the network don't share a fingerprintable
+  profile.
 
-Instead of only recording:
+### 5.4 Levels of deceptive access
 
-```
-192.0.2.10 attempted root login
-```
+| Level | Name | Contents | Roadmap |
+|---|---|---|---|
+| 1 | Basic access (MVP) | Fake login succeeds; profile-driven shell; fake filesystem; simulated users and processes; basic commands | PR 6–8 |
+| 2 | Believable server | Applications, decoy `.env`, Git repositories, database contents, SSH keys, cron jobs and services, cloud configuration | PR 9 |
+| 3 | Interactive environment | Simulated privilege escalation, Docker, network discovery, lateral movement across fictional machines, decoy databases and repositories, long-running and returning sessions | PR 9 and 13+ |
 
-AITO records, per session:
+## 6. Intelligence signals
 
-- which credentials were tried;
-- which credential gained synthetic access, and by which policy rule;
-- what commands were executed, in order, with timing;
-- how long the session lasted;
-- which directories and files they looked at;
-- what they searched for;
-- which tools they tried to install;
-- whether they attempted persistence (cron, `authorized_keys`, systemd units, rc files);
-- whether they attempted to download malware (URLs recorded, not fetched);
-- whether they attempted to discover or reach other machines.
+Per session and across sessions, AITO captures:
 
-From full sessions AITO builds **behavioural fingerprints** of attackers, and
-from fingerprints it correlates sessions into **campaigns**.
+- which credentials were tried, and which one gained synthetic access (and by which rule);
+- commands executed, in order;
+- **time between commands**;
+- **failed versus successful simulated operations**;
+- **search patterns and files of interest**;
+- **manual exploration versus automated scripts** (from timing, input cadence,
+  command batching and paste patterns);
+- tools they tried to install;
+- **credential reuse between sessions**, including reuse of decoy secrets;
+- **persistence attempts** (cron, `authorized_keys`, systemd units, rc files);
+- malware download attempts (URLs recorded, never fetched);
+- **attempts to discover other fictional machines**;
+- **returning to a previously accessed sensor**, and what they do on return;
+- session duration.
 
-Headline research metric: **post-compromise behaviour**, meaning what attackers
-do immediately after obtaining apparent access.
+From full sessions AITO builds **behavioural fingerprints**, and from
+fingerprints it correlates sessions into **campaigns**. Headline research
+metric: **post-compromise behaviour**.
 
-### Event types (additions to the event schema)
+## 7. Event types (normalised tier)
 
 | Event | Key fields |
 |---|---|
-| `auth.attempt` | session, src, username, password hash/class, decision, rule |
-| `session.start` / `session.end` | session, src, profile id, account, duration |
-| `command.input` | session, raw input, parsed command, args, handler |
-| `fs.access` | session, path, operation (read/list/write/delete) |
+| `auth.attempt` | session, src, username, password reference (see 8.2), decision, rule, policy kind, experiment id |
+| `session.start` / `session.end` | session, src, profile id, account, duration, returning-visitor flag |
+| `command.input` | session, sequence, parsed command, args, handler, time since previous command |
+| `command.result` | session, sequence, simulated outcome (success/failure), error class |
+| `fs.access` | session, path, operation (read/list/search/write/delete) |
 | `outbound.simulated` | session, tool, destination host/URL/port, simulated response |
+| `discovery.attempt` | session, technique, fictional target |
 | `privesc.simulated` | session, technique, simulated outcome |
 | `persistence.attempt` | session, mechanism, target path/unit |
 | `secret.accessed` / `secret.used` | session, decoy id, where found / where used |
+| `upload.received` | session, quarantine reference, size, hash |
 
-Exact field names are fixed in the event schema PR; this table defines the
-intent.
+Exact field names are fixed in the canonical event schema (PR 1–2).
 
-## 8. Open questions
+## 8. Data model: evidence, events, intelligence
 
-- Retention and handling for recorded sessions that contain attacker-supplied
-  data (credentials attackers bring with them, URLs, uploaded files).
-- Whether files attackers upload via SFTP/SCP are kept, and if so how they are
-  quarantined.
-- How many profiles per sensor and how often to rotate them.
-- Legal/hosting review for each region sensors are deployed in.
+### 8.1 Three tiers
+
+| Tier | Examples | Properties |
+|---|---|---|
+| Raw evidence | TTY recordings, authentication attempts, command input, uploaded files | Append-only, integrity-checked (hashes), never rewritten by analysis |
+| Normalised events | Parsed commands, file access, simulated connections | Derived from raw evidence; can be regenerated when parsers change |
+| Intelligence | Behavioural fingerprints, campaign relationships, classifications | Derived from normalised events; versioned by analysis engine |
+
+Analysis can be revised and re-run at any time without losing the original
+evidence. Every derived record points back to the evidence it came from.
+
+### 8.2 Attacker-supplied passwords
+
+- Passwords are **not** stored in plaintext in normalised events or
+  intelligence. Those tiers carry a keyed hash (for reuse correlation) plus
+  coarse features (length, character classes, membership in known wordlists).
+- If plaintext is retained at all, it lives only in raw evidence, encrypted at
+  rest, with access restricted to named research roles and logged.
+- Retention period for plaintext is fixed and short, and shorter than for
+  hashed forms. Exact periods are set in the retention policy (PR 3–4).
+
+### 8.3 Uploaded files
+
+- Uploads land in a quarantine directory outside anything the honeypot can
+  execute or serve, with sanitised names, content-addressed by hash.
+- Quarantined files are never executed, opened by the sensor, or fetched to
+  analyst machines without explicit handling. Access is restricted and logged.
+- Explicit size limits, retention period and deletion process.
+
+## 9. Release gate: first end-to-end test
+
+The first successful end-to-end test is a **formal release gate** for the MVP.
+In CI, against a real sensor and collector:
+
+1. an external test client connects over SSH;
+2. it authenticates using a synthetic credential (exact match);
+3. it explores the fake server (`uname`, `ls`, `cat`, `ps`, `ip addr`) and gets
+   consistent answers from the profile;
+4. it attempts a simulated download;
+5. the collector holds a complete investigation record: raw evidence,
+   normalised events and a session summary;
+6. **no external connection** was made and **no real command** was executed,
+   proven by the security boundary tests running alongside.
+
+## 10. Delivery approach
+
+Don't implement all the deception features at once. First get the event
+schema, an isolated sensor and the collector working. Then prove the
+fake-login-to-fake-shell experience through the release gate. Only then add
+Level 2 and Level 3 complexity.
+
+## 11. Open questions
+
+- Exact retention periods for plaintext passwords, hashes and uploads, and who
+  may access them.
+- How many profiles per sensor, and how often to rotate them.
+- Rules for running experimental credential policies (who approves, how long).
+- Legal and hosting review for each region sensors are deployed in.

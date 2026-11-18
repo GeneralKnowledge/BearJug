@@ -8,3 +8,7 @@ recorded. They never reach a real machine.
 
 - [Deceptive Access design](docs/design/deceptive-access.md)
 - [Implementation roadmap](docs/roadmap.md)
+
+Defining engineering rule: make the deception as convincing as possible to the
+attacker, while making the real infrastructure as inaccessible as possible to
+them.
