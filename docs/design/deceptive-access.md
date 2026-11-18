@@ -181,11 +181,17 @@ flowchart TD
     J -->|Download payload| K[Record payload request - no fetch]
     J -->|Privilege escalation| L[Simulate result]
     J -->|Persistence attempt| M[Record attempt]
-    K --> N[Private intelligence collector]
-    L --> N
-    M --> N
-    E --> N
+    I --> S[(Restricted local spool)]
+    K --> S
+    L --> S
+    M --> S
+    E --> S
+    S -->|read-only| T[Separate shipper]
+    T -->|authenticated, one-way| N[Private intelligence collector]
 ```
+
+The honeypot only writes to the spool. The shipper is the only component that
+reaches the collector, and nothing routes back into the sensor (section 2.3).
 
 ### Components
 
