@@ -9,6 +9,7 @@ recorded. They never reach a real machine.
 - [Deceptive Access design](docs/design/deceptive-access.md)
 - [Implementation roadmap](docs/roadmap.md)
 - [Canonical event schema](docs/schema.md)
+- [Evidence ingestion and storage](docs/ingestion.md)
 
 ## Development
 

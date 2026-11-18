@@ -139,6 +139,7 @@ supporting event id.
 
 ## Not in this version
 
-Digest verification against the bytes, retention periods, evidence hash chaining, storage layout and the Cowrie
-to-event mapping belong to the ingestion and storage PRs (3 and 4). Behavioural
+Digest verification against the bytes, encrypted storage and draft retention are
+implemented by the collector (see [ingestion.md](ingestion.md)). Evidence hash
+chaining and the Cowrie-to-event mapping come later. Behavioural
 fingerprints as their own record type come with PR 10 and 11.
