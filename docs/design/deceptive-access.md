@@ -469,6 +469,13 @@ public sensor is deployed**, answering: how long raw passwords are kept;
 whether plaintext is needed at all; who can retrieve uploaded files; and how
 access and deletion are audited.
 
+**Decided 2026-11-18** for the first public sensor (details in
+[ingestion.md, "Evidence policy"](../ingestion.md)). Raw sensitive evidence,
+including passwords inside it, is kept 30 days and other raw evidence 90 days,
+always encrypted. Nobody can decrypt sensitive evidence or retrieve uploads
+until operator identity is enforced at the OS level. Every read and deletion
+is audited. The sensor's evidence volume is capped at 12 GiB by a disk guard.
+
 ## 9. Release gate: first end-to-end test
 
 The first successful end-to-end test is a **formal release gate** for the MVP.
@@ -493,8 +500,8 @@ Level 2 and Level 3 complexity.
 
 ## 11. Open questions
 
-- Exact retention periods and access roles (must be decided before public
-  sensors, see 8.4).
+- OS-enforced operator identity, before anyone may decrypt sensitive
+  evidence (retention periods were decided in 8.4).
 - How many profiles per sensor, and how often to rotate them.
 - Rules for running experimental credential policies (who approves, how long).
 - Legal and hosting review for each region sensors are deployed in.

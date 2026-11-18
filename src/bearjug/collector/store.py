@@ -29,6 +29,7 @@ from pathlib import Path
 
 from pydantic import TypeAdapter, ValidationError
 
+from .. import policy
 from ..fsutil import fsync_dir, private_dir
 from ..schema.common import Identifier
 from ..schema.evidence import (
@@ -158,14 +159,16 @@ class ReconcileReport:
 
 @dataclass
 class Settings:
-    """``config.json``. The retention numbers are a draft: design section 8.4
-    requires them to be decided before any public sensor is deployed."""
+    """``config.json``. Defaults are the adopted evidence policy
+    (:mod:`bearjug.policy`)."""
 
-    retention_days_default: int = 365
-    retention_days_sensitive: int = 30
-    max_evidence_bytes: int = 32 * 1024 * 1024
-    sensitive_readers: list[str] = field(default_factory=list)
-    """Actors allowed to decrypt sensitive evidence. Empty means nobody."""
+    retention_days_default: int = policy.RETENTION_DAYS_DEFAULT
+    retention_days_sensitive: int = policy.RETENTION_DAYS_SENSITIVE
+    max_evidence_bytes: int = policy.MAX_EVIDENCE_BYTES
+    sensitive_readers: list[str] = field(default_factory=lambda: list(policy.SENSITIVE_READERS))
+    """Actors allowed to decrypt sensitive evidence. Empty means nobody, and
+    it must stay empty until operator identity is enforced by the OS:
+    ``--actor`` is only a label the caller types."""
 
     # Limits on what an unauthenticated client can make the collector do.
     max_concurrent_requests: int = 16
