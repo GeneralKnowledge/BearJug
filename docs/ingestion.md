@@ -51,10 +51,10 @@ refused item: `<id>.bin` with the original bytes (0600, never executable) and
 SHA-256, the collector's reason, and whether the bytes were kept. The shipper
 never parses or runs the `.bin` files.
 
-* Size cap, `--dead-letter-max-mb` (default 256): past it, only the metadata is
+* Size cap, `--dead-letter-max-mb` (default 64): past it, only the metadata is
   written, so a flood of bad evidence can't fill the sensor's disk. Items over
   the shipping size limit are recorded the same way, metadata only.
-* Retention, `--dead-letter-days` (default 30): older entries are removed on
+* Retention, `--dead-letter-days` (default 14): older entries are removed on
   every pass.
 
 These entries can hold attacker passwords in the clear, just like Cowrie's own
@@ -77,7 +77,7 @@ With `--delete-acknowledged`, each pass removes from the spool:
 | a TTY log or download | once the collector's acknowledgement is saved in the state file |
 | a rotated JSON log (`cowrie.json.<date>`) | once every line in it has been acknowledged, and it hasn't changed for 60 seconds |
 | refused evidence copied to the dead-letter directory | at once: the dead-letter copy is now the only one |
-| refused evidence that could not be copied (dead-letter full, or over the size limit) | after `--unpreserved-days` (default 30) |
+| refused evidence that could not be copied (dead-letter full, or over the size limit) | after `--unpreserved-days` (default 7) |
 
 The live `cowrie.json` is never removed (Cowrie is writing it), nor is
 anything the collector hasn't acknowledged.
@@ -142,16 +142,63 @@ way.
 | TTY logs | Cowrie's `ttylog_limit_size` (ends the session) and `ttylog_min_free` (stops recording when the disk is low) |
 | downloads | Cowrie's `download_limit_size` |
 | one item the shipper will send | 32 MiB; larger ones are dead-lettered as metadata |
-| dead-letter directory | `--dead-letter-max-mb` (256), `--dead-letter-days` (30) |
-| the whole spool | the shipper logs a warning every pass while it holds more than `--spool-warn-mb` (512). That means the collector isn't acknowledging; unacknowledged evidence is never removed to make room |
+| dead-letter directory | `--dead-letter-max-mb` (64), `--dead-letter-days` (14) |
+| the spool directories | the shipper logs a warning every pass while they hold more than `--spool-warn-mb` (8192). That means the collector isn't acknowledging; unacknowledged evidence is never removed to make room |
+| the whole evidence volume (12 GiB) | the disk guard, below: warn at 70%, stop Cowrie at 80%, resume below 60% |
 
-The spool warning is not capacity control. If the collector stays
-unreachable, unacknowledged evidence keeps accumulating until the volume
-fills. What actually bounds it is the evidence volume being its own
-filesystem, or having a quota. Then a full spool stops Cowrie recording
-(`ttylog_min_free`, failed writes) instead of filling the sensor's root
-filesystem. Size that volume for the longest collector outage you want to
-ride out.
+The spool warning is not capacity control. It measures only the spool
+directories, while the disk guard measures the whole evidence filesystem.
+These are deliberately separate checks.
+
+### Disk guard
+
+`bearjug-diskguard` (in `src/bearjug/diskguard.py`) runs on the sensor and is
+what actually bounds the evidence volume. Every 15 seconds it measures the
+whole evidence filesystem:
+
+| Usage | Action |
+|---|---|
+| below 70% | nothing |
+| 70% (8.4 GiB of 12) | capacity warning in the log; `--alert-command` runs once when the level is crossed |
+| 80% (9.6 GiB) | stops Cowrie cleanly with `--stop-command` (e.g. `docker stop --time 30 cowrie`). The shipper keeps running and delivers the backlog |
+| back below 60% (7.2 GiB) | starts Cowrie with `--start-command`, but only if the shipper's last pass reached the collector within the last 2 minutes. Otherwise Cowrie stays stopped |
+
+* **Nothing is deleted.** Space comes back only as the shipper delivers
+  evidence and removes what the collector acknowledged.
+* **Hysteresis.** Between 60% and 80% a stopped Cowrie stays stopped, so it
+  doesn't flap around one threshold. The guard saves whether it stopped
+  Cowrie, so a restarted guard won't start it while the volume is still too
+  full.
+* **Shipper health.** Each shipper pass writes `<state>.health.json` (0600),
+  saying whether it reached the collector. A pass with nothing to send still
+  checks that the collector answers, so an idle shipper isn't mistaken for a
+  healthy one.
+* **Separate filesystem.** The guard refuses to run if the evidence directory
+  is on the same filesystem as `/` (`--allow-shared-filesystem` is for local
+  testing only), so the evidence volume can never fill the root filesystem.
+* **Unreadable guard state.** If the guard's state file is corrupt or has the
+  wrong shape, the guard still starts. It logs a critical error, keeps the bad
+  file as `<state>.corrupt`, and treats Cowrie's state as unknown. It still
+  stops Cowrie at 80% (even if Cowrie may already be stopped), and it restarts
+  Cowrie only by the normal rule: below 60% with healthy shipping.
+* **Untrustworthy health reports.** Anything other than a well-formed,
+  successful, recent report counts as unhealthy, and never crashes the guard.
+  That covers a missing or unreadable file, the wrong JSON shape, a missing,
+  invalid or zone-less timestamp, and a timestamp in the future.
+* A failed stop or start command is logged and retried on the next check.
+  The commands come only from the guard's own arguments, run without a
+  shell, and are never built from anything in the spool.
+
+```
+bearjug-diskguard --evidence-dir /srv/evidence \
+  --shipper-health /srv/evidence/shipper/shipper-state.health.json \
+  --state /srv/evidence/shipper/diskguard-state.json \
+  --stop-command "docker stop --time 30 cowrie" --start-command "docker start cowrie"
+```
+
+12 GiB is a pilot allocation, not a promise to survive an outage of a given
+length. **Measure daily evidence growth during the first controlled
+deployment, then revisit the volume size and thresholds.**
 
 ### Permissions
 
@@ -172,19 +219,43 @@ snapshots, backups, and a provider reusing a disk. It does not protect against
 someone who controls the running sensor, which is why acknowledged evidence is
 removed promptly and the retention limits above are short.
 
-### Decisions that block public deployment
+### Evidence policy
 
-Every value below is a placeholder. **No public sensor until each one is
-decided** (design 8.4):
+Adopted on 2026-11-18 for the first public sensor and one private collector.
+All of these are the code's defaults, from `src/bearjug/policy.py`, and
+`tests/test_policy.py` pins them:
 
-| Decision | Placeholder |
+| Setting | Value |
 |---|---|
-| Collector retention, sensitive evidence | 30 days |
-| Collector retention, ordinary evidence | 365 days |
-| Dead-letter retention and maximum size | 30 days, 256 MiB |
-| How long unpreserved evidence stays on the sensor | 30 days |
-| Who may decrypt sensitive evidence (`sensitive_readers`) | nobody |
-| Maximum total evidence volume on the sensor, and what happens when it fills | not set; see "Size limits on the sensor" |
+| `retention_days_sensitive` (collector) | 30 days |
+| `retention_days_default` (collector) | 90 days |
+| `max_evidence_bytes` | 32 MiB |
+| `sensitive_readers` | `[]`: nobody (see below) |
+| dead-letter retention / maximum size (shipper) | 14 days / 64 MiB |
+| unpreserved evidence on the sensor | 7 days |
+| `spool_warn_mb` | 8192 |
+| evidence volume | 12 GiB, its own encrypted filesystem |
+| disk guard | warn 70%, stop Cowrie 80%, resume below 60% once shipping is healthy |
+
+The principles behind it:
+* sensitive raw material is kept for the shortest useful period;
+* ordinary raw evidence is kept long enough to investigate recurring activity;
+* derived intelligence (later) may be kept longer than the attacker material it
+  came from;
+* a failed collector connection must never fill the sensor's root filesystem.
+
+These are retention periods for **raw evidence** only. Campaign fingerprints,
+aggregated statistics and non-sensitive derived intelligence can be kept
+considerably longer once the normalisation and intelligence layers exist.
+
+**Sensitive evidence stays unreadable for now.** The collector's `--actor`
+is a label typed by whoever runs the command, not an authenticated identity.
+So `sensitive_readers` is only an allowlist of labels, and anyone who can run
+the CLI as the collector's user could claim any name. Until the collector
+enforces operator identity at the OS level, keep `sensitive_readers` empty.
+That also means the collector's service account must not be able to
+impersonate a reviewer. Sensitive evidence is still collected, encrypted and
+retained; only routine access to its plaintext is off.
 
 ## Wire protocol
 
@@ -321,8 +392,9 @@ All of these go through `bearjug-collector` on the collector machine and are
 written to the audit log (`--actor` names who acted; it defaults to `$USER`):
 
 * `show ID --reason R` decrypts one record. Sensitive records can
-  only be read by actors listed in `sensitive_readers` (empty by default); a
-  refused attempt is audited too.
+  only be read by actors listed in `sensitive_readers`. That list is empty
+  under the current policy (see "Evidence policy"), so sensitive records can't
+  be read at all. A refused attempt is audited too.
 * `delete ID --reason R` removes the encrypted bytes and keeps the
   record as a tombstone.
 * `purge` deletes everything past its retention period.
@@ -342,9 +414,9 @@ without re-encrypting anything.
 
 ### Retention
 
-**Draft retention policy**: sensitive evidence 30 days, everything else 365
-days, 32 MiB per item. **These are placeholders.** See "Decisions that block
-public deployment" above.
+Sensitive evidence 30 days, everything else 90 days, 32 MiB per item: the
+adopted policy (see "Evidence policy" above). Run `purge` daily, for example
+from a systemd timer or cron.
 
 ## Trying it locally
 
@@ -363,6 +435,10 @@ bearjug-shipper --sensor-id sensor-1 --key-file sensor-1.key \
   --download-dir var/lib/cowrie/downloads --state shipper-state.json \
   --delete-acknowledged
 
+# and a third, watching the volume the Cowrie output lives on
+bearjug-diskguard --evidence-dir var --shipper-health shipper-state.health.json \
+  --stop-command "echo stop" --start-command "echo start" --allow-shared-filesystem
+
 bearjug-collector --data ./collector list
 bearjug-collector --data ./collector check
 ```
@@ -370,7 +446,8 @@ bearjug-collector --data ./collector check
 ## Not in this PR
 
 * Network isolation, containers, the spool mount and its permissions, the
-  encrypted evidence volume and the reverse proxy configuration itself: PR 5,
+  encrypted evidence volume, running the disk guard with real Cowrie stop and
+  start commands, and the reverse proxy configuration itself: PR 5,
   which also turns the shipper's boundary into tests against real containers.
 * Normalising Cowrie events into canonical events, and keyed password hashes.
 * Evidence hash chaining.

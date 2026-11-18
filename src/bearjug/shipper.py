@@ -56,7 +56,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import wire
+from . import policy, wire
 from .fsutil import fsync_dir, private_dir, write_private
 from .schema.evidence import EvidenceKind
 
@@ -65,7 +65,7 @@ log = logging.getLogger("bearjug.shipper")
 JSON_LOG_NAME = re.compile(r"^cowrie\.json(\.[0-9][0-9_-]*)?$")
 HASH_NAME = re.compile(r"^[0-9a-f]{64}$")
 MAX_LINE_BYTES = 1024 * 1024
-DEFAULT_MAX_FILE_BYTES = 32 * 1024 * 1024
+DEFAULT_MAX_FILE_BYTES = policy.MAX_EVIDENCE_BYTES
 
 
 def _ident(st: os.stat_result) -> list[int]:
@@ -158,17 +158,17 @@ class Config:
     insecure_http: bool = False
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
     dead_letter_dir: Path = Path("dead-letter")
-    dead_letter_max_bytes: int = 256 * 1024 * 1024
-    dead_letter_retention_days: float = 30.0
+    dead_letter_max_bytes: int = policy.DEAD_LETTER_MAX_BYTES
+    dead_letter_retention_days: float = policy.DEAD_LETTER_RETENTION_DAYS
     delete_acknowledged: bool = False
     """Remove evidence from the spool once the collector has acknowledged it.
     Needs the spool mounted so the shipper can unlink files (see docs)."""
-    unpreserved_retention_days: float = 30.0
+    unpreserved_retention_days: float = policy.UNPRESERVED_RETENTION_DAYS
     """How long evidence that was refused and could not be copied to the
     dead-letter directory stays in the spool before it is removed."""
     rotated_log_settle_seconds: float = 60.0
     """A rotated JSON log must be this old before it is removed."""
-    spool_warn_bytes: int = 512 * 1024 * 1024
+    spool_warn_bytes: int = policy.SPOOL_WARN_BYTES
     """Log a warning each pass while the spool holds more than this."""
     timeout: float = 30.0
 
@@ -531,17 +531,61 @@ class Shipper:
                 total += sum(p.lstat().st_size for p in directory.iterdir() if p.is_file())
         return total
 
+    # --- health, for the disk guard -----------------------------------------
+
+    @property
+    def health_path(self) -> Path:
+        return self.config.state_path.with_name(self.config.state_path.stem + ".health.json")
+
+    def probe(self) -> None:
+        """Confirm the collector answers over a verified connection. Any HTTP
+        status counts (it has no route for GET); no evidence is involved."""
+        try:
+            with urllib.request.urlopen(self.url, timeout=self.config.timeout, context=self._ssl):
+                pass
+        except urllib.error.HTTPError:
+            return
+        except (urllib.error.URLError, OSError) as e:
+            raise ShipError(f"collector unreachable: {e}") from None
+
+    def _write_health(self, error: str | None) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        previous = {}
+        try:
+            previous = json.loads(self.health_path.read_text())
+        except (FileNotFoundError, ValueError):
+            pass
+        health = {
+            "checked_at": now,
+            "ok": error is None,
+            "error": error,
+            "last_ok_at": now if error is None else previous.get("last_ok_at"),
+        }
+        write_private(self.health_path, json.dumps(health).encode())
+
     def run_once(self) -> int:
         """Ship everything new, then remove what the collector acknowledged.
         Raises :class:`ShipError` if the collector is unavailable; progress so
-        far is kept, and acknowledged evidence is still cleaned up."""
+        far is kept, and acknowledged evidence is still cleaned up.
+
+        Each pass records whether it reached the collector in the health file
+        next to the state file, which the disk guard reads before restarting
+        Cowrie."""
         self.dead_letter.prune()
         try:
-            return (
+            sent = (
                 self.ship_json_logs()
                 + self.ship_hashed_files(self.config.tty_dir, EvidenceKind.TTY_LOG)
                 + self.ship_hashed_files(self.config.download_dir, EvidenceKind.UPLOAD)
             )
+            if sent == 0:
+                self.probe()
+        except ShipError as e:
+            self._write_health(str(e))
+            raise
+        else:
+            self._write_health(None)
+            return sent
         finally:
             if self.config.delete_acknowledged:
                 self.clean_spool()
@@ -564,15 +608,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--download-dir", type=Path, help="Cowrie download_path")
     p.add_argument("--state", type=Path, default=Path("shipper-state.json"))
     p.add_argument("--dead-letter-dir", type=Path, default=Path("dead-letter"), help="where refused evidence is kept")
-    p.add_argument("--dead-letter-max-mb", type=int, default=256)
-    p.add_argument("--dead-letter-days", type=float, default=30.0)
+    p.add_argument("--dead-letter-max-mb", type=int, default=policy.DEAD_LETTER_MAX_BYTES // policy.MIB)
+    p.add_argument("--dead-letter-days", type=float, default=policy.DEAD_LETTER_RETENTION_DAYS)
     p.add_argument(
         "--delete-acknowledged",
         action="store_true",
         help="remove evidence from the spool once the collector has acknowledged it",
     )
-    p.add_argument("--unpreserved-days", type=float, default=30.0, help="how long refused, unpreserved evidence stays in the spool")
-    p.add_argument("--spool-warn-mb", type=int, default=512)
+    p.add_argument(
+        "--unpreserved-days",
+        type=float,
+        default=policy.UNPRESERVED_RETENTION_DAYS,
+        help="how long refused, unpreserved evidence stays in the spool",
+    )
+    p.add_argument("--spool-warn-mb", type=int, default=policy.SPOOL_WARN_BYTES // policy.MIB)
     p.add_argument("--ca-file", help="CA bundle that signed the collector's certificate")
     p.add_argument("--insecure-http", action="store_true", help="allow http:// for local testing only")
     p.add_argument("--interval", type=float, default=5.0)

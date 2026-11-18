@@ -1231,3 +1231,71 @@ def test_cleanup_and_blob_writes_sync_their_directories(server, store, cowrie, t
     assert cowrie / "tty" in synced  # the deletion was made durable
     [row] = store.list()
     assert store._blob_path(row["evidence_id"]).parent in synced  # blob durable before its record
+
+
+# --- collector outage, disk guard and recovery, end to end ---------------------
+
+
+def test_collector_outage_stops_cowrie_and_recovers_without_losing_evidence(store, cowrie, tmp_path, sensor_key):
+    from bearjug.diskguard import DiskGuard, GuardConfig
+
+    commands = []
+    usage = {"pct": 50.0}
+    srv = start_server(store)
+    host, port = srv.server_address
+    shipper = cleaning_shipper(srv, cowrie, tmp_path, sensor_key)
+    guard = DiskGuard(
+        GuardConfig(
+            evidence_dir=cowrie,
+            shipper_health=shipper.health_path,
+            state_path=tmp_path / "guard.json",
+            stop_command=["stop"],
+            start_command=["start"],
+            allow_shared_filesystem=True,
+        ),
+        usage=lambda p: usage["pct"],
+        runner=lambda argv: commands.append(argv[0]) or True,
+    )
+
+    # Normal running: evidence is shipped and removed, shipping is healthy.
+    (cowrie / "tty" / ("aa" * 32)).write_bytes(b"session 1")
+    assert shipper.run_once() == 1
+    assert guard.check() == "ok"
+
+    # The collector goes away. Evidence piles up and is all kept.
+    stop_server(srv)
+    for i in range(3):
+        (cowrie / "tty" / (f"{i}" * 64)).write_bytes(b"unacknowledged session %d" % i)
+    with pytest.raises(ShipError):
+        shipper.run_once()
+    assert len(list((cowrie / "tty").iterdir())) == 3
+    assert json.loads(shipper.health_path.read_text())["ok"] is False
+
+    usage["pct"] = 82
+    assert guard.check() == "stopped" and commands == ["stop"]
+    # Space comes back (an operator cleared something else), but the collector
+    # is still down: Cowrie stays stopped and the evidence stays put.
+    usage["pct"] = 50
+    with pytest.raises(ShipError):
+        shipper.run_once()
+    assert guard.check() == "held"
+    assert len(list((cowrie / "tty").iterdir())) == 3
+
+    # The collector comes back on the same address; the backlog is delivered
+    # and removed, shipping is healthy, Cowrie resumes.
+    srv2 = CollectorServer((host, port), store)
+    threading.Thread(target=srv2.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
+    try:
+        assert shipper.run_once() == 3
+        assert list((cowrie / "tty").iterdir()) == []
+        assert guard.check() == "resumed" and commands == ["stop", "start"]
+        assert len(store.list()) == 4
+    finally:
+        stop_server(srv2)
+
+
+def test_idle_shipper_still_proves_the_collector_is_reachable(server, cowrie, tmp_path, sensor_key):
+    shipper = make_shipper(server, cowrie, tmp_path, sensor_key)
+    assert shipper.run_once() == 0
+    assert json.loads(shipper.health_path.read_text())["ok"] is True
+    assert stat.S_IMODE(shipper.health_path.stat().st_mode) == 0o600
