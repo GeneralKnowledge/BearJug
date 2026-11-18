@@ -8,13 +8,13 @@ import socket
 import sqlite3
 import subprocess
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from bearjug import wire
-from bearjug.collector.keys import add_sensor
 from bearjug.collector.server import CollectorServer
 from bearjug.collector.store import IngestError, Store, init_data_dir
 from bearjug.schema import EvidenceKind, RawEvidence
@@ -56,8 +56,8 @@ def store(data_dir):
 
 
 @pytest.fixture
-def sensor_key(data_dir):
-    return add_sensor(data_dir / "sensors.json", "sensor-1")
+def sensor_key(store):
+    return store.add_sensor("sensor-1", actor="test")
 
 
 @pytest.fixture
@@ -90,6 +90,7 @@ def make_shipper(server, cowrie, tmp_path, key, sensor_id="sensor-1"):
             tty_dir=cowrie / "tty",
             download_dir=cowrie / "downloads",
             state_path=tmp_path / "shipper-state.json",
+            dead_letter_dir=tmp_path / "dead-letter",
             insecure_http=True,
         )
     )
@@ -193,7 +194,7 @@ def test_wrong_sensor_key_is_refused(server, store, cowrie, tmp_path):
 
 
 def test_a_sensor_cannot_ship_as_another_sensor(server, store, data_dir, cowrie, tmp_path, sensor_key):
-    add_sensor(data_dir / "sensors.json", "sensor-2")
+    store.add_sensor("sensor-2", actor="test")
     (cowrie / "log" / "cowrie.json").write_bytes(line(COMMAND))
     with pytest.raises(ShipError, match="401"):
         make_shipper(server, cowrie, tmp_path, sensor_key, sensor_id="sensor-2").run_once()
@@ -262,6 +263,11 @@ def test_corrupted_download_is_rejected_and_not_retried(server, store, cowrie, t
     assert shipper.run_once() == 0
     assert store.list() == []
     assert len(shipper.state.shipped) == 1
+    # Not lost: kept in the dead-letter directory with the reason.
+    [meta] = (tmp_path / "dead-letter").glob("*.json")
+    entry = json.loads(meta.read_text())
+    assert "sha256 does not match" in entry["reason"] and entry["bytes_kept"]
+    assert meta.with_suffix(".bin").read_bytes() == b"tampered"
 
 
 @pytest.mark.parametrize("body", [b"not json", b"[1, 2]", b'{"input": "ls"}'])
@@ -427,20 +433,394 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "bearjug"
 
 
 def test_collector_has_no_client_code():
-    """The collector only answers; it imports nothing that could open a
-    connection to a sensor."""
-    forbidden = {"socket", "urllib.request", "http.client", "requests", "httpx", "urllib3", "aiohttp", "asyncio"}
+    """The collector only answers; nothing in it can open a connection to a
+    sensor (the only connect() allowed is SQLite's)."""
+    forbidden = {"urllib.request", "http.client", "requests", "httpx", "urllib3", "aiohttp", "asyncio"}
     for path in (SRC / "collector").glob("*.py"):
         for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node, ast.Import):
                 names = {a.name for a in node.names}
+                assert not names & forbidden, f"{path.name} imports {names & forbidden}"
             elif isinstance(node, ast.ImportFrom):
                 names = {node.module or ""} | {f"{node.module}.{a.name}" for a in node.names}
-            else:
-                continue
-            assert not names & forbidden, f"{path.name} imports {names & forbidden}"
+                assert not names & forbidden, f"{path.name} imports {names & forbidden}"
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                attr, owner = node.func.attr, node.func.value
+                if attr in {"connect", "connect_ex", "create_connection", "socket"}:
+                    assert isinstance(owner, ast.Name) and owner.id == "sqlite3", f"{path.name}:{node.lineno} {attr}()"
 
 
 def test_shipper_requires_tls_unless_told_otherwise(tmp_path, sensor_key):
     with pytest.raises(ValueError, match="https"):
         Shipper(Config(sensor_id="sensor-1", key=sensor_key, collector_url="http://collector", state_path=tmp_path / "s"))
+
+
+# =============================================================================
+# Hardening after review
+# =============================================================================
+
+from bearjug.collector import cli  # noqa: E402
+from bearjug.collector.store import EvidenceMissing  # noqa: E402
+
+
+def start_server(store):
+    srv = CollectorServer(("127.0.0.1", 0), store)
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
+    return srv
+
+
+def stop_server(srv):
+    srv.shutdown()
+    srv.server_close()
+
+
+def raw_request(srv, headers: dict, body: bytes = b"", *, send_body=True, timeout=5.0) -> bytes:
+    host, port = srv.server_address
+    s = socket.create_connection((host, port), timeout=timeout)
+    head = f"POST {wire.PATH} HTTP/1.1\r\nHost: x\r\n" + "".join(f"{k}: {v}\r\n" for k, v in headers.items()) + "\r\n"
+    s.sendall(head.encode() + (body if send_body else b""))
+    data = b""
+    while True:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    s.close()
+    return data
+
+
+def signed_headers(key, body, sensor_id="sensor-1", length=None):
+    meta = wire.encode_meta(meta_for(body, sensor_id=sensor_id))
+    return {
+        "Content-Length": str(len(body) if length is None else length),
+        wire.META_HEADER: meta,
+        wire.SIGNATURE_HEADER: wire.sign(key, meta, body),
+    }
+
+
+# --- 1. unauthenticated resource exhaustion ----------------------------------
+
+
+def test_connections_over_the_limit_are_closed_at_once(store, sensor_key):
+    store.settings.max_concurrent_requests = 2
+    srv = start_server(store)
+    try:
+        host, port = srv.server_address
+        held = [socket.create_connection((host, port)) for _ in range(2)]
+        time.sleep(0.2)
+        extra = socket.create_connection((host, port), timeout=2)
+        assert extra.recv(1) == b""  # closed without being served
+        for s in held:
+            s.close()
+        time.sleep(0.2)
+        body = line(COMMAND)[:-1]
+        assert raw_request(srv, signed_headers(sensor_key, body), body).startswith(b"HTTP/1.0 201")
+    finally:
+        stop_server(srv)
+
+
+def test_slow_clients_are_cut_off_at_the_deadline(store):
+    store.settings.request_deadline_seconds = 0.5
+    srv = start_server(store)
+    try:
+        host, port = srv.server_address
+        s = socket.create_connection((host, port), timeout=5)
+        started = time.monotonic()
+        closed = False
+        for ch in b"POST /v1/evidence HTTP/1.1\r\nHost: x\r\nX-Slow: " + b"a" * 100:
+            try:
+                s.send(bytes([ch]))
+            except OSError:
+                closed = True
+                break
+            time.sleep(0.05)
+            if time.monotonic() - started > 3:
+                break
+        if not closed:
+            s.settimeout(3)
+            closed = s.recv(1) == b""
+        assert closed and time.monotonic() - started < 3
+    finally:
+        stop_server(srv)
+
+
+def test_body_is_not_read_for_an_unknown_sensor(server):
+    # Claims 30 MB but sends none of it: refused from the headers alone.
+    body = b"x"
+    headers = signed_headers(os.urandom(32), body, sensor_id="nobody", length=30_000_000)
+    headers[wire.META_HEADER] = wire.encode_meta(meta_for(b"x" * 0, sensor_id="nobody").model_copy(update={"size_bytes": 30_000_000}))
+    started = time.monotonic()
+    assert raw_request(server, headers, send_body=False).startswith(b"HTTP/1.0 401")
+    assert time.monotonic() - started < 2
+
+
+def test_repeated_auth_failures_are_rate_limited(store, sensor_key):
+    store.settings.auth_failures_per_minute = 3
+    srv = start_server(store)
+    try:
+        body = line(COMMAND)[:-1]
+        for _ in range(3):
+            assert raw_request(srv, signed_headers(os.urandom(32), body), body).startswith(b"HTTP/1.0 401")
+        # Even a correct request from that address now waits for the bucket to refill.
+        assert raw_request(srv, signed_headers(sensor_key, body), body).startswith(b"HTTP/1.0 429")
+    finally:
+        stop_server(srv)
+
+
+def test_request_rate_is_limited_per_client(store, sensor_key):
+    store.settings.rate_limit_per_second = 0.01
+    store.settings.rate_limit_burst = 2
+    srv = start_server(store)
+    try:
+        body = line(COMMAND)[:-1]
+        codes = [raw_request(srv, signed_headers(sensor_key, body), body)[9:12] for _ in range(3)]
+        assert codes == [b"201", b"200", b"429"]
+    finally:
+        stop_server(srv)
+
+
+def test_shipper_backs_off_on_429(store, cowrie, tmp_path, sensor_key):
+    store.settings.rate_limit_per_second = 0.01
+    store.settings.rate_limit_burst = 1
+    srv = start_server(store)
+    try:
+        (cowrie / "log" / "cowrie.json").write_bytes(line(LOGIN) + line(COMMAND))
+        shipper = make_shipper(srv, cowrie, tmp_path, sensor_key)
+        with pytest.raises(ShipError, match="429"):
+            shipper.run_once()
+        assert len(store.list()) == 1
+        assert not list((tmp_path / "dead-letter").glob("*.json"))  # retried later, not dead-lettered
+    finally:
+        stop_server(srv)
+
+
+# --- 2. key rotation takes effect in the running collector --------------------
+
+
+def test_rotation_by_another_process_applies_to_the_next_upload(server, store, data_dir, sensor_key):
+    body1, body2 = line(COMMAND)[:-1], b'{"eventid": "cowrie.session.closed"}'
+    assert raw_request(server, signed_headers(sensor_key, body1), body1).startswith(b"HTTP/1.0 201")
+    cli_store = Store(data_dir)  # what the CLI opens: a different process in real life
+    assert cli_store.rotate_key(actor="reuben") == "ek-2"
+    assert raw_request(server, signed_headers(sensor_key, body2), body2).startswith(b"HTTP/1.0 201")
+    keys = sorted(store.record(r["evidence_id"]).content.encryption.key_id for r in store.list())
+    assert keys == ["ek-1", "ek-2"]
+    assert [a["action"] for a in store.audit_log()][-1] == "rotate-evidence-key"
+
+
+def test_rotate_key_cli_waits_for_the_running_collector_to_confirm(store, data_dir, capsys):
+    stop = threading.Event()
+
+    def beat():
+        while not stop.is_set():
+            store.heartbeat()
+            time.sleep(0.1)
+
+    t = threading.Thread(target=beat, daemon=True)
+    t.start()
+    try:
+        assert cli.main(["--data", str(data_dir), "--actor", "reuben", "rotate-key", "--wait", "3"]) == 0
+        assert "confirmed it is encrypting with ek-2" in capsys.readouterr().out
+        assert cli.main(["--data", str(data_dir), "key-status"]) == 0
+    finally:
+        stop.set()
+        t.join()
+
+
+def test_rotate_key_cli_says_so_when_no_collector_is_running(data_dir, capsys):
+    assert cli.main(["--data", str(data_dir), "rotate-key"]) == 0
+    assert "no collector is running" in capsys.readouterr().out
+
+
+def test_key_status_fails_when_the_collector_uses_an_old_key(store, data_dir):
+    store.heartbeat()
+    # Simulate a collector that has not picked up the rotation.
+    store.db.execute("UPDATE collector_state SET value = 'ek-0' WHERE name = 'encrypting_key_id'")
+    assert cli.main(["--data", str(data_dir), "key-status"]) == 1
+
+
+# --- 3. dead-letter directory -------------------------------------------------
+
+
+def test_refused_lines_are_dead_lettered_and_the_rest_still_ships(server, store, cowrie, tmp_path, sensor_key):
+    (cowrie / "log" / "cowrie.json").write_bytes(b"not json from a new cowrie version\n" + line(COMMAND))
+    assert make_shipper(server, cowrie, tmp_path, sensor_key).run_once() == 1
+    assert len(store.list()) == 1
+    [meta] = (tmp_path / "dead-letter").glob("*.json")
+    entry = json.loads(meta.read_text())
+    assert entry["kind"] == "cowrie.event" and "422" in entry["reason"] and "not valid JSON" in entry["reason"]
+    assert entry["source"].endswith("cowrie.json@0")
+    data = meta.with_suffix(".bin")
+    assert data.read_bytes() == b"not json from a new cowrie version"
+    assert data.stat().st_mode & 0o777 == 0o600
+
+
+def test_dead_letter_cap_keeps_metadata_only(server, cowrie, tmp_path, sensor_key):
+    shipper = make_shipper(server, cowrie, tmp_path, sensor_key)
+    shipper.dead_letter.max_bytes = 10
+    (cowrie / "log" / "cowrie.json").write_bytes(b"x" * 50 + b"\n")
+    shipper.run_once()
+    [meta] = (tmp_path / "dead-letter").glob("*.json")
+    entry = json.loads(meta.read_text())
+    assert not entry["bytes_kept"] and "full" in entry["bytes_not_kept_because"]
+    assert not list((tmp_path / "dead-letter").glob("*.bin"))
+
+
+def test_oversized_files_are_recorded_not_dropped(server, cowrie, tmp_path, sensor_key):
+    shipper = make_shipper(server, cowrie, tmp_path, sensor_key)
+    shipper.config.max_file_bytes = 4
+    (cowrie / "tty" / ("12" * 32)).write_bytes(b"too long")
+    shipper.run_once()
+    [meta] = (tmp_path / "dead-letter").glob("*.json")
+    assert "over the 4-byte limit" in json.loads(meta.read_text())["reason"]
+
+
+def test_dead_letter_entries_expire(server, cowrie, tmp_path, sensor_key):
+    shipper = make_shipper(server, cowrie, tmp_path, sensor_key)
+    (cowrie / "log" / "cowrie.json").write_bytes(b"bad\n")
+    shipper.run_once()
+    old = time.time() - 31 * 86400
+    for p in (tmp_path / "dead-letter").iterdir():
+        os.utime(p, (old, old))
+    shipper.run_once()
+    assert list((tmp_path / "dead-letter").iterdir()) == []
+
+
+# --- 4. startup reconciliation and crash recovery ----------------------------
+
+
+class _CrashOnInsert:
+    """Stands in for the SQLite connection and fails the evidence insert, as
+    if the collector died right after writing the blob."""
+
+    def __init__(self, real):
+        self.real = real
+
+    def execute(self, sql, *args):
+        if sql.startswith("INSERT INTO evidence"):
+            raise RuntimeError("simulated crash")
+        return self.real.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+
+def test_crash_after_blob_write_is_recovered(store, data_dir):
+    body = line(COMMAND)[:-1]
+    real = store.db
+    store.db = _CrashOnInsert(real)
+    with pytest.raises(RuntimeError):
+        store.ingest(meta_for(body), body)
+    store.db = real
+    assert store.list() == []
+
+    report = Store(data_dir).reconcile()
+    assert len(report.orphans_quarantined) == 1 and report.healthy
+    assert (data_dir / "orphans" / report.orphans_quarantined[0]).exists()
+    # The shipper never got a reply, so it resends; that now stores cleanly.
+    assert store.ingest(meta_for(body), body)[0] == "stored"
+    assert store.reconcile().healthy
+
+
+def test_interrupted_temp_writes_are_removed(store, data_dir):
+    (data_dir / "blobs" / "ab").mkdir()
+    (data_dir / "blobs" / "ab" / "ev-abc.tmp").write_bytes(b"half")
+    report = store.reconcile()
+    assert report.temp_files_removed == ["ev-abc.tmp"] and report.healthy
+    assert not (data_dir / "blobs" / "ab" / "ev-abc.tmp").exists()
+
+
+def test_missing_blob_is_never_treated_as_healthy(store, data_dir, capsys):
+    body = line(COMMAND)[:-1]
+    _, eid = store.ingest(meta_for(body), body)
+    store._blob_path(eid).unlink()
+    report = store.reconcile()
+    assert report.missing == [eid] and not report.healthy
+    assert store.list()[0]["issue"] == "blob missing"
+    with pytest.raises(EvidenceMissing):
+        store.read(eid, actor="r", reason="x")
+    assert cli.main(["--data", str(data_dir), "check"]) == 1
+    assert "MISSING" in capsys.readouterr().out
+
+
+def test_crash_during_delete_is_completed(store, monkeypatch):
+    body = line(COMMAND)[:-1]
+    _, eid = store.ingest(meta_for(body), body)
+
+    def crash(self, missing_ok=False):
+        raise RuntimeError("simulated crash")
+
+    monkeypatch.setattr(Path, "unlink", crash)
+    with pytest.raises(RuntimeError):
+        store.delete(eid, actor="reuben", reason="test")
+    monkeypatch.undo()
+    assert store.record(eid) is not None and store._blob_path(eid).exists()
+    report = store.reconcile()
+    assert report.deletions_completed == [eid] and report.healthy
+    assert not store._blob_path(eid).exists()
+
+
+def test_deep_check_finds_corrupt_blobs(store):
+    body = line(COMMAND)[:-1]
+    _, eid = store.ingest(meta_for(body), body)
+    blob = bytearray(store._blob_path(eid).read_bytes())
+    blob[-1] ^= 1
+    store._blob_path(eid).write_bytes(bytes(blob))
+    assert store.reconcile().healthy  # the shallow check only looks for presence
+    report = store.reconcile(deep=True)
+    assert report.corrupt == [eid] and not report.healthy
+
+
+# --- 5. sensor key lifecycle --------------------------------------------------
+
+
+def test_revoked_sensor_is_refused_without_touching_evidence_keys(server, store, data_dir, cowrie, tmp_path, sensor_key):
+    log_file = cowrie / "log" / "cowrie.json"
+    log_file.write_bytes(line(LOGIN))
+    shipper = make_shipper(server, cowrie, tmp_path, sensor_key)
+    assert shipper.run_once() == 1
+    keyring_before = (data_dir / "evidence-keys.json").read_bytes()
+
+    Store(data_dir).revoke_sensor("sensor-1", actor="reuben", reason="suspected compromise")
+    with log_file.open("ab") as f:
+        f.write(line(COMMAND))
+    with pytest.raises(ShipError, match="401"):
+        shipper.run_once()
+    assert len(store.list()) == 1  # evidence already received is kept
+    assert (data_dir / "evidence-keys.json").read_bytes() == keyring_before
+    assert store.sensors()[0]["status"] == "revoked"
+
+
+def test_replaced_key_works_and_the_old_one_does_not(server, store, data_dir, sensor_key):
+    new_key = Store(data_dir).replace_sensor_key("sensor-1", actor="reuben", reason="scheduled re-key")
+    body = line(COMMAND)[:-1]
+    assert raw_request(server, signed_headers(sensor_key, body), body).startswith(b"HTTP/1.0 401")
+    assert raw_request(server, signed_headers(new_key, body), body).startswith(b"HTTP/1.0 201")
+
+
+def test_a_revoked_sensor_can_be_reissued_a_key(store):
+    store.add_sensor("sensor-9", actor="a")
+    store.revoke_sensor("sensor-9", actor="a", reason="test")
+    assert store.sensor_key("sensor-9") is None
+    key = store.replace_sensor_key("sensor-9", actor="a", reason="rebuilt")
+    assert store.sensor_key("sensor-9") == key
+
+
+def test_last_seen_is_recorded(server, store, cowrie, tmp_path, sensor_key):
+    assert store.sensors()[0]["last_seen_at"] is None
+    (cowrie / "log" / "cowrie.json").write_bytes(line(COMMAND))
+    make_shipper(server, cowrie, tmp_path, sensor_key).run_once()
+    seen = store.sensors()[0]
+    assert seen["last_seen_at"] is not None and seen["last_ip"] == "127.0.0.1"
+
+
+def test_sensor_lifecycle_is_audited(store):
+    store.add_sensor("sensor-2", actor="reuben")
+    store.replace_sensor_key("sensor-2", actor="reuben", reason="re-key")
+    store.revoke_sensor("sensor-2", actor="reuben", reason="retired")
+    actions = [(a["actor"], a["action"]) for a in store.audit_log()]
+    assert actions == [
+        ("reuben", "sensor-register"),
+        ("reuben", "sensor-key-replace"),
+        ("reuben", "sensor-revoke"),
+    ]

@@ -7,8 +7,10 @@ Two separate files in the collector's data directory, never shipped anywhere:
     adds a new key and makes it active; old keys stay only while evidence
     encrypted under them is retained.
 ``sensors.json``
-    One shared key per sensor, used only to authenticate that sensor's
-    shipper. A sensor key can't decrypt anything.
+    One shared key per sensor, with its status (active or revoked) and when it
+    was registered, re-keyed or revoked. Used only to authenticate that
+    sensor's shipper: a sensor key can't decrypt anything, and revoking or
+    replacing one never touches the evidence keys.
 
 The password HMAC key (see :mod:`bearjug.schema.passwords`) is a third,
 separate secret used by normalisation; ingestion doesn't need it.
@@ -95,17 +97,45 @@ class EvidenceKeyring:
         return AESGCM(self.keys[key_id]).decrypt(nonce, ct, _aad(evidence_id, sha256))
 
 
-def load_sensor_keys(path: Path) -> dict[str, bytes]:
+@dataclass
+class SensorEntry:
+    key: bytes
+    status: str = "active"
+    """``active`` or ``revoked``. A revoked sensor's uploads are refused."""
+    registered_at: str = ""
+    key_replaced_at: str | None = None
+    revoked_at: str | None = None
+
+    def to_json(self) -> dict:
+        return {
+            "key": self.key.hex(),
+            "status": self.status,
+            "registered_at": self.registered_at,
+            "key_replaced_at": self.key_replaced_at,
+            "revoked_at": self.revoked_at,
+        }
+
+
+def load_sensors(path: Path) -> dict[str, SensorEntry]:
     if not path.exists():
         return {}
-    return {k: bytes.fromhex(v) for k, v in json.loads(path.read_text()).items()}
+    raw = json.loads(path.read_text())
+    return {k: SensorEntry(**{**v, "key": bytes.fromhex(v["key"])}) for k, v in raw.items()}
 
 
-def add_sensor(path: Path, sensor_id: str) -> bytes:
-    keys = load_sensor_keys(path)
-    if sensor_id in keys:
-        raise ValueError(f"sensor {sensor_id} already exists")
-    key = secrets.token_bytes(32)
-    keys[sensor_id] = key
-    _write_private(path, {k: v.hex() for k, v in keys.items()})
-    return key
+def save_sensors(path: Path, sensors: dict[str, SensorEntry]) -> None:
+    _write_private(path, {k: v.to_json() for k, v in sensors.items()})
+
+
+def new_sensor_key() -> bytes:
+    return secrets.token_bytes(32)
+
+
+def file_signature(path: Path) -> tuple[int, int, int] | None:
+    """Changes whenever a file is replaced, so a running collector notices
+    key changes made by the CLI."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
