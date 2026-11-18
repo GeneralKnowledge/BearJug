@@ -57,6 +57,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import wire
+from .fsutil import fsync_dir, private_dir, write_private
 from .schema.evidence import EvidenceKind
 
 log = logging.getLogger("bearjug.shipper")
@@ -67,26 +68,10 @@ MAX_LINE_BYTES = 1024 * 1024
 DEFAULT_MAX_FILE_BYTES = 32 * 1024 * 1024
 
 
-def write_private(path: Path, data: bytes) -> None:
-    """Atomically write a file readable only by its owner. The mode is set
-    explicitly, not left to the umask."""
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-    os.replace(tmp, path)
-
-
-def make_private_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    os.chmod(path, 0o700)
+def _ident(st: os.stat_result) -> list[int]:
+    """What makes a spool file *this* file: device, inode, size and
+    modification time. A replacement, or a rewrite in place, changes it."""
+    return [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns]
 
 
 class ShipError(Exception):
@@ -113,7 +98,7 @@ class DeadLetter:
         self.dir = directory
         self.max_bytes = max_bytes
         self.retention_seconds = retention_days * 86400
-        make_private_dir(directory)
+        private_dir(directory)
 
     def _write(self, path: Path, data: bytes) -> None:
         write_private(path, data)
@@ -155,6 +140,8 @@ class DeadLetter:
             if p.is_file() and not p.is_symlink() and p.stat().st_mtime < cutoff:
                 p.unlink()
                 removed += 1
+        if removed:
+            fsync_dir(self.dir)
         return removed
 
 
@@ -199,6 +186,12 @@ class State:
     """``kind:name`` (or a JSON log's ``device:inode``) refused and not copied
     to the dead-letter directory, with when that happened. Not resent; kept in
     the spool until ``unpreserved_retention_days`` passes."""
+    identity: dict[str, list[int]] = field(default_factory=dict)
+    """For each acknowledged, unpreserved or offset-tracked entry: the
+    ``[device, inode, size, mtime_ns]`` of the exact file that was read.
+    Cleanup removes a file only if it still matches, so a file swapped in at
+    the same name is never deleted on the strength of another file's
+    acknowledgement."""
 
     @classmethod
     def load(cls, path: Path) -> State:
@@ -210,10 +203,16 @@ class State:
             offsets={str(k): int(v) for k, v in raw.get("offsets", {}).items()},
             acked=set(raw.get("acked", [])),
             unpreserved={str(k): float(v) for k, v in raw.get("unpreserved", {}).items()},
+            identity={str(k): [int(x) for x in v] for k, v in raw.get("identity", {}).items()},
         )
 
     def save(self, path: Path) -> None:
-        data = {"offsets": self.offsets, "acked": sorted(self.acked), "unpreserved": self.unpreserved}
+        data = {
+            "offsets": self.offsets,
+            "acked": sorted(self.acked),
+            "unpreserved": self.unpreserved,
+            "identity": self.identity,
+        }
         write_private(path, json.dumps(data).encode())
 
     def done(self, marker: str) -> bool:
@@ -364,6 +363,11 @@ class Shipper:
                     offset += len(line)
                     self.state.offsets[key] = offset
                     self.state.save(self.config.state_path)
+                # Identity as of now: if Cowrie appends after this, size and
+                # mtime differ and cleanup leaves the file alone.
+                if self.state.offsets.get(key) is not None:
+                    self.state.identity[key] = _ident(os.fstat(f.fileno()))
+                    self.state.save(self.config.state_path)
         return sent
 
     def ship_hashed_files(self, directory: Path | None, kind: EvidenceKind) -> int:
@@ -392,6 +396,7 @@ class Shipper:
                         data=None,
                     )
                     self.state.unpreserved[marker] = time.time()
+                    self.state.identity[marker] = _ident(st)
                     self.state.save(self.config.state_path)
                     continue
                 data = f.read(self.config.max_file_bytes + 1)
@@ -407,11 +412,14 @@ class Shipper:
                 )
                 if not kept:
                     self.state.unpreserved[marker] = time.time()
+                    self.state.identity[marker] = _ident(st)
                     self.state.save(self.config.state_path)
                     continue
             # Only reached after a 2xx reply, or with the bytes safe in the
-            # dead-letter directory. Saved before any deletion can happen.
+            # dead-letter directory. Saved, with the identity of the exact
+            # file that was sent, before any deletion can happen.
             self.state.acked.add(marker)
+            self.state.identity[marker] = _ident(st)
             self.state.save(self.config.state_path)
         return sent
 
@@ -420,6 +428,21 @@ class Shipper:
     def _unpreserved_expired(self, saved: State, marker: str) -> bool:
         since = saved.unpreserved.get(marker)
         return since is not None and time.time() - since > self.config.unpreserved_retention_days * 86400
+
+    @staticmethod
+    def _same_file(path: Path, ident: list[int] | None) -> bool:
+        """Whether ``path`` is still the regular file that was acknowledged.
+        Checked with lstat, so a symlink put in its place never matches."""
+        if ident is None:
+            return False
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            return False
+        if stat.S_ISREG(st.st_mode) and _ident(st) == ident:
+            return True
+        log.warning("%s is not the file that was acknowledged (replaced or changed); leaving it", path)
+        return False
 
     def clean_spool(self) -> list[str]:
         """Remove spool files whose evidence is safe elsewhere.
@@ -447,15 +470,21 @@ class Shipper:
                 marker = f"{kind.value}:{path.name}"
                 present.add(marker)
                 if marker in saved.acked or self._unpreserved_expired(saved, marker):
+                    if not self._same_file(path, saved.identity.get(marker)):
+                        continue
                     path.unlink()
                     removed.append(str(path))
                     self.state.acked.discard(marker)
                     self.state.unpreserved.pop(marker, None)
+                    self.state.identity.pop(marker, None)
             # Forget markers whose files are gone, so the state stays small.
             prefix = f"{kind.value}:"
             self.state.acked = {m for m in self.state.acked if not m.startswith(prefix) or m in present}
-            for m in [m for m in self.state.unpreserved if m.startswith(prefix) and m not in present]:
-                del self.state.unpreserved[m]
+            for table in (self.state.unpreserved, self.state.identity):
+                for m in [m for m in table if m.startswith(prefix) and m not in present]:
+                    del table[m]
+            if any(r.startswith(str(directory)) for r in removed):
+                fsync_dir(directory)
 
         directory = self.config.log_dir
         if directory is not None and directory.is_dir():
@@ -463,7 +492,7 @@ class Shipper:
             for path in directory.iterdir():
                 if not JSON_LOG_NAME.match(path.name) or path.is_symlink() or not path.is_file():
                     continue
-                st = path.stat()
+                st = os.lstat(path)
                 key = f"{st.st_dev}:{st.st_ino}"
                 live.add(key)
                 if path.name == "cowrie.json" or now - st.st_mtime < self.config.rotated_log_settle_seconds:
@@ -472,15 +501,23 @@ class Shipper:
                     continue  # not every line acknowledged yet
                 if key in saved.unpreserved and not self._unpreserved_expired(saved, key):
                     continue
+                # A matching device:inode isn't enough (inodes are reused):
+                # size and mtime must match what was read, too.
+                if not self._same_file(path, saved.identity.get(key)):
+                    continue
                 path.unlink()
                 removed.append(str(path))
                 live.discard(key)
                 self.state.offsets.pop(key, None)
                 self.state.unpreserved.pop(key, None)
+                self.state.identity.pop(key, None)
             for key in [k for k in self.state.offsets if k not in live]:
                 del self.state.offsets[key]
-            for key in [k for k in self.state.unpreserved if ":" in k and k.split(":")[0].isdigit() and k not in live]:
-                del self.state.unpreserved[key]
+            for table in (self.state.unpreserved, self.state.identity):
+                for key in [k for k in table if k.split(":")[0].isdigit() and k not in live]:
+                    del table[key]
+            if any(r.startswith(str(directory)) for r in removed):
+                fsync_dir(directory)
 
         self.state.save(self.config.state_path)
         for path in removed:

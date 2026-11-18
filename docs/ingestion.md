@@ -98,6 +98,35 @@ on disk, not from memory. So:
 
 Tests cover each of these.
 
+**Only the file that was acknowledged is removed.** Along with each
+acknowledgement the state records the device, inode, size and modification
+time of the exact file that was read. Before removing anything, cleanup
+`lstat`s the path and removes it only if it is still a regular file with that
+identity. A file swapped in under the same name, a file rewritten in place, or
+a symlink is left alone, with a warning. Rotated JSON logs get the same check:
+a matching `device:inode` progress marker is not enough on its own, because
+inodes are reused. One window remains: between the `lstat` and the `unlink`,
+something with write access to the directory could swap the file. Only Cowrie
+has that access, and the window is a single system call.
+
+### Durability
+
+What survives a process crash **and a power loss**, on a filesystem that
+honours `fsync` (ext4, xfs and btrfs with default mount options):
+
+* the shipper's state file and every collector key, config and sensor file:
+  written to a temp file, fsynced, renamed, then the directory is fsynced
+  (`bearjug.fsutil`);
+* a collector blob: fsynced, renamed, directory fsynced, and only then is its
+  record committed, with SQLite `synchronous=FULL`. The 2xx the shipper waits
+  for is sent after that commit;
+* removals from the spool: the directory is fsynced after each cleanup pass.
+  If a power cut undoes a removal anyway, the file is simply shipped again and
+  acknowledged as a duplicate.
+
+On filesystems or virtual disks that ignore `fsync`, only the process-crash
+guarantee holds.
+
 Removing files means the shipper needs permission to delete entries in
 Cowrie's output directories, not just read them. The intended setup (PR 5):
 Cowrie owns the directories, the shipper's user is in their group, directories
@@ -116,8 +145,13 @@ way.
 | dead-letter directory | `--dead-letter-max-mb` (256), `--dead-letter-days` (30) |
 | the whole spool | the shipper logs a warning every pass while it holds more than `--spool-warn-mb` (512). That means the collector isn't acknowledging; unacknowledged evidence is never removed to make room |
 
-The evidence volume should also be its own filesystem or have a quota, so a
-full spool can't fill the sensor's root filesystem.
+The spool warning is not capacity control. If the collector stays
+unreachable, unacknowledged evidence keeps accumulating until the volume
+fills. What actually bounds it is the evidence volume being its own
+filesystem, or having a quota. Then a full spool stops Cowrie recording
+(`ttylog_min_free`, failed writes) instead of filling the sensor's root
+filesystem. Size that volume for the longest collector outage you want to
+ride out.
 
 ### Permissions
 
@@ -138,10 +172,19 @@ snapshots, backups, and a provider reusing a disk. It does not protect against
 someone who controls the running sensor, which is why acknowledged evidence is
 removed promptly and the retention limits above are short.
 
-**Before any public sensor**, decide these values. The current numbers are
-placeholders: unpreserved evidence (30 days), dead-letter retention (30 days)
-and size (256 MiB). They go with the collector's retention decision (design
-8.4).
+### Decisions that block public deployment
+
+Every value below is a placeholder. **No public sensor until each one is
+decided** (design 8.4):
+
+| Decision | Placeholder |
+|---|---|
+| Collector retention, sensitive evidence | 30 days |
+| Collector retention, ordinary evidence | 365 days |
+| Dead-letter retention and maximum size | 30 days, 256 MiB |
+| How long unpreserved evidence stays on the sensor | 30 days |
+| Who may decrypt sensitive evidence (`sensitive_readers`) | nobody |
+| Maximum total evidence volume on the sensor, and what happens when it fills | not set; see "Size limits on the sensor" |
 
 ## Wire protocol
 
@@ -300,10 +343,8 @@ without re-encrypting anything.
 ### Retention
 
 **Draft retention policy**: sensitive evidence 30 days, everything else 365
-days, 32 MiB per item. **These are placeholders, and a decision is required
-before deployment.** Design section 8.4 requires the real values, who may
-read sensitive evidence, and the sensor-side limits above to be decided
-before any public sensor is deployed.
+days, 32 MiB per item. **These are placeholders.** See "Decisions that block
+public deployment" above.
 
 ## Trying it locally
 

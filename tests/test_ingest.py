@@ -1132,3 +1132,102 @@ def test_permissions_do_not_depend_on_the_umask(tmp_path, server, cowrie, sensor
     assert mode(tmp_path / "shipper-state.json") == 0o600
     assert mode(tmp_path / "dl-loose") == 0o700
     assert {mode(p) for p in (tmp_path / "dl-loose").iterdir()} == {0o600}
+
+
+# --- cleanup only removes the exact file that was acknowledged -----------------
+
+
+def test_replaced_file_is_not_deleted_on_another_files_ack(server, store, cowrie, tmp_path, sensor_key):
+    name = "ab" * 32
+    tty = cowrie / "tty" / name
+    tty.write_bytes(b"recording A")
+    shipper = make_shipper(server, cowrie, tmp_path, sensor_key)
+    shipper.run_once()  # A acknowledged, but cleanup is off
+    # Something on the sensor swaps a different file in at the same name.
+    swap = cowrie / "tty" / "incoming"
+    swap.write_bytes(b"recording B, never shipped")
+    os.replace(swap, tty)
+    shipper.config.delete_acknowledged = True
+    shipper.run_once()
+    assert tty.read_bytes() == b"recording B, never shipped"
+
+
+def test_file_rewritten_in_place_is_not_deleted(server, cowrie, tmp_path, sensor_key):
+    tty = cowrie / "tty" / ("cd" * 32)
+    tty.write_bytes(b"recording A")
+    shipper = make_shipper(server, cowrie, tmp_path, sensor_key)
+    shipper.run_once()
+    time.sleep(0.01)
+    tty.write_bytes(b"recording C")  # same inode, same size, new mtime
+    shipper.config.delete_acknowledged = True
+    shipper.run_once()
+    assert tty.exists()
+
+
+def test_symlink_swapped_in_is_not_followed_or_deleted(server, cowrie, tmp_path, sensor_key):
+    tty = cowrie / "tty" / ("ef" * 32)
+    tty.write_bytes(b"recording")
+    shipper = make_shipper(server, cowrie, tmp_path, sensor_key)
+    shipper.run_once()
+    target = tmp_path / "elsewhere"
+    target.write_bytes(b"not evidence")
+    tty.unlink()
+    tty.symlink_to(target)
+    shipper.config.delete_acknowledged = True
+    shipper.run_once()
+    assert tty.is_symlink() and target.exists()
+
+
+def test_replaced_rotated_log_is_not_deleted(server, store, cowrie, tmp_path, sensor_key):
+    rotated = cowrie / "log" / "cowrie.json.2026-11-17"
+    rotated.write_bytes(line(LOGIN))
+    shipper = make_shipper(server, cowrie, tmp_path, sensor_key)
+    shipper.config.rotated_log_settle_seconds = 0
+    shipper.run_once()
+    # Rewritten in place with the same length: same device and inode, so the
+    # progress marker matches, but it is not the file that was read.
+    time.sleep(0.01)
+    data = line(LOGIN)
+    rotated.write_bytes(data.replace(b"postgres", b"postgrex"))
+    shipper.config.delete_acknowledged = True
+    # Stop this pass from re-reading the file, so only cleanup acts on it.
+    shipper.ship_json_logs = lambda: 0
+    shipper.run_once()
+    assert rotated.exists()
+
+
+# --- durability -----------------------------------------------------------------
+
+
+def test_state_and_key_writes_sync_their_directory(tmp_path, monkeypatch):
+    from bearjug import fsutil
+
+    synced = []
+    real = fsutil.fsync_dir
+    monkeypatch.setattr(fsutil, "fsync_dir", lambda p: (synced.append(Path(p)), real(p)))
+    fsutil.write_private(tmp_path / "state.json", b"{}")
+    assert synced == [tmp_path]
+    assert (tmp_path / "state.json").read_bytes() == b"{}"
+    with pytest.raises(FileExistsError):
+        fsutil.write_private(tmp_path / "state.json", b"x", exclusive=True)
+    assert not (tmp_path / "state.json.tmp").exists()
+
+
+def test_cleanup_and_blob_writes_sync_their_directories(server, store, cowrie, tmp_path, sensor_key, monkeypatch):
+    import bearjug.collector.store as store_mod
+    import bearjug.shipper as shipper_mod
+
+    synced = []
+    real = shipper_mod.fsync_dir
+
+    def spy(p):
+        synced.append(Path(p))
+        real(p)
+
+    monkeypatch.setattr(shipper_mod, "fsync_dir", spy)
+    monkeypatch.setattr(store_mod, "fsync_dir", spy)
+    (cowrie / "tty" / ("12" * 32)).write_bytes(b"recording")
+    cleaning_shipper(server, cowrie, tmp_path, sensor_key).run_once()
+    assert cowrie / "tty" in synced  # the deletion was made durable
+    [row] = store.list()
+    assert store._blob_path(row["evidence_id"]).parent in synced  # blob durable before its record

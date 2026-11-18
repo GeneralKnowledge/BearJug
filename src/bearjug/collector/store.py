@@ -29,11 +29,11 @@ from pathlib import Path
 
 from pydantic import TypeAdapter, ValidationError
 
+from ..fsutil import fsync_dir, private_dir
 from ..schema.common import Identifier
 from ..schema.evidence import (
     ALWAYS_SENSITIVE_KINDS,
     Encryption,
-    EvidenceKind,
     InlineContent,
     RawEvidence,
     StoredContent,
@@ -196,12 +196,7 @@ class Settings:
         _write_private(path, json.dumps(self.__dict__, indent=2) + "\n")
 
 
-def _private_dir(path: Path) -> Path:
-    """Create a directory only the collector's user can enter. The mode is
-    set explicitly, so it doesn't depend on the umask."""
-    path.mkdir(parents=True, exist_ok=True)
-    os.chmod(path, 0o700)
-    return path
+_private_dir = private_dir
 
 
 def _ts(dt: datetime) -> str:
@@ -236,6 +231,8 @@ class Store:
         self.db = sqlite3.connect(root / DB, check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
+        # Every commit is on disk before the shipper gets its acknowledgement.
+        self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript(SCHEMA_SQL)
         for name in (DB, DB + "-wal", DB + "-shm"):
             if (root / name).exists():
@@ -436,6 +433,7 @@ class Store:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, path)
+            fsync_dir(path.parent)  # the blob survives a power cut before its record exists
             # A crash here leaves a blob with no record; reconcile() quarantines
             # it, and since no reply was sent the shipper resends it.
             self.db.execute(
@@ -572,6 +570,8 @@ class Store:
                     orphans = self.root / ORPHANS
                     _private_dir(orphans)
                     os.replace(path, orphans / path.name)
+                    fsync_dir(orphans)
+                    fsync_dir(path.parent)
                     report.orphans_quarantined.append(path.name)
                     self._audit("reconcile", "orphan-quarantined", path.name, "encrypted blob had no record")
                 elif row["deleted_at"]:
