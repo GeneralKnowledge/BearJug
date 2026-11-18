@@ -110,3 +110,12 @@ def test_events_are_immutable(base, pw):
     e = parse_event(auth(base, pw))
     with pytest.raises(ValidationError):
         e.username = "admin"
+
+
+def test_session_start_records_ip_recurrence_not_identity(base):
+    e = parse_event({**base, "event_type": "session.start", "src": {"ip": "203.0.113.7", "port": 22},
+                     "account": "root", "policy": {"kind": "production"}, "source_ip_seen_before": True})
+    assert e.source_ip_seen_before is True
+    with pytest.raises(ValidationError):
+        parse_event({**base, "event_type": "session.start", "src": {"ip": "203.0.113.7", "port": 22},
+                     "account": "root", "policy": {"kind": "production"}, "returning_visitor": True})

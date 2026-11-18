@@ -114,8 +114,13 @@ class SessionStart(BaseEvent):
     account: str
     """The synthetic account the attacker logged in as."""
     policy: AuthPolicy
-    returning_visitor: bool | None = None
-    """None until the collector has checked for earlier visits."""
+    source_ip_seen_before: bool | None = None
+    """Whether this source IP has connected to any sensor before. A fact about
+    the address only: a recurring IP is not a recurring attacker (NAT, proxies,
+    shared scanners). None until the collector has checked.
+
+    Whether this session belongs to the same actor as an earlier one is a
+    judgement, recorded in the intelligence tier as a ``session.link``."""
 
 
 class SessionEnd(BaseEvent):

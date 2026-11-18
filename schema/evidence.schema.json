@@ -1,12 +1,11 @@
 {
+  "$comment": "Generated from bearjug.schema; do not edit. STRUCTURAL ONLY: this JSON Schema does not encode the cross-field security rules (evidence sensitivity, production auth policy, experiment labelling, outbound destinations). Passing it does not mean a record is acceptable. Validate with bearjug.schema before storing or acting on a record. See docs/schema.md.",
   "$defs": {
     "Encryption": {
       "additionalProperties": false,
       "properties": {
         "algorithm": {
-          "minLength": 1,
-          "title": "Algorithm",
-          "type": "string"
+          "$ref": "#/$defs/EncryptionAlgorithm"
         },
         "key_id": {
           "maxLength": 128,
@@ -22,6 +21,15 @@
       ],
       "title": "Encryption",
       "type": "object"
+    },
+    "EncryptionAlgorithm": {
+      "description": "Authenticated encryption algorithms accepted for stored evidence.",
+      "enum": [
+        "aes-256-gcm",
+        "chacha20-poly1305"
+      ],
+      "title": "EncryptionAlgorithm",
+      "type": "string"
     },
     "EvidenceKind": {
       "enum": [
@@ -55,18 +63,10 @@
     },
     "StoredContent": {
       "additionalProperties": false,
-      "description": "Content held outside the record, such as a TTY log or a quarantined file.",
+      "description": "Content held outside the record, such as a TTY log or a quarantined file.\n\nAlways encrypted, so nothing that leaves the record is ever stored in the\nclear, whatever it turns out to contain.",
       "properties": {
         "encryption": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Encryption"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+          "$ref": "#/$defs/Encryption"
         },
         "storage": {
           "const": "stored",
@@ -81,7 +81,8 @@
         }
       },
       "required": [
-        "uri"
+        "uri",
+        "encryption"
       ],
       "title": "StoredContent",
       "type": "object"

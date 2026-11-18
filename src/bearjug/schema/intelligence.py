@@ -62,6 +62,21 @@ class LinkBasis(str, Enum):
     SOURCE_OVERLAP = "source_overlap"
 
 
+class SessionLink(BaseIntelligence):
+    """Judges that a session continues an earlier one by the same actor.
+
+    This is how "returning visitor" is expressed: never as a fact on the
+    session, always as a scored, evidenced association. A shared source IP alone
+    is weak evidence and should carry low confidence.
+    """
+
+    kind: Literal["session.link"] = "session.link"
+    session_id: Identifier
+    prior_session_id: Identifier
+    basis: list[LinkBasis] = Field(min_length=1)
+    support: Support
+
+
 class CampaignLink(BaseIntelligence):
     """Assigns a session to a campaign."""
 
@@ -73,7 +88,7 @@ class CampaignLink(BaseIntelligence):
 
 
 Intelligence = Annotated[
-    Union[SessionAssessment, CampaignLink],
+    Union[SessionAssessment, SessionLink, CampaignLink],
     Field(discriminator="kind"),
 ]
 

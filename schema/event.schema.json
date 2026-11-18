@@ -1,4 +1,5 @@
 {
+  "$comment": "Generated from bearjug.schema; do not edit. STRUCTURAL ONLY: this JSON Schema does not encode the cross-field security rules (evidence sensitivity, production auth policy, experiment labelling, outbound destinations). Passing it does not mean a record is acceptable. Validate with bearjug.schema before storing or acting on a record. See docs/schema.md.",
   "$defs": {
     "AuthAttempt": {
       "additionalProperties": false,
@@ -1310,18 +1311,6 @@
           "title": "Profile Id",
           "type": "string"
         },
-        "returning_visitor": {
-          "anyOf": [
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Returning Visitor"
-        },
         "schema_version": {
           "const": "1.0",
           "default": "1.0",
@@ -1341,6 +1330,18 @@
           "pattern": "^[A-Za-z0-9._:-]+$",
           "title": "Session Id",
           "type": "string"
+        },
+        "source_ip_seen_before": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Ip Seen Before"
         },
         "src": {
           "$ref": "#/$defs/Endpoint"

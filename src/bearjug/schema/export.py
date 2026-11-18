@@ -22,11 +22,21 @@ SCHEMAS: dict[str, TypeAdapter] = {
 }
 
 
+STRUCTURAL_ONLY = (
+    "Generated from bearjug.schema; do not edit. STRUCTURAL ONLY: this JSON "
+    "Schema does not encode the cross-field security rules (evidence "
+    "sensitivity, production auth policy, experiment labelling, outbound "
+    "destinations). Passing it does not mean a record is acceptable. Validate "
+    "with bearjug.schema before storing or acting on a record. See docs/schema.md."
+)
+
+
 def render() -> dict[str, str]:
-    return {
-        name: json.dumps(adapter.json_schema(), indent=2, sort_keys=True) + "\n"
-        for name, adapter in SCHEMAS.items()
-    }
+    out = {}
+    for name, adapter in SCHEMAS.items():
+        schema = {"$comment": STRUCTURAL_ONLY, **adapter.json_schema()}
+        out[name] = json.dumps(schema, indent=2, sort_keys=True) + "\n"
+    return out
 
 
 def main(argv: list[str]) -> int:

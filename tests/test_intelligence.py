@@ -29,3 +29,12 @@ def test_scores_are_probabilities(value, confidence):
         parse_intelligence({**BASE, "kind": "session.assessment", "session_id": "sess-1",
                             "credential_discovered": True,
                             "automation_likelihood": {"value": value, "support": {**SUPPORT, "confidence": confidence}}})
+
+
+def test_session_link_is_scored_and_evidenced():
+    rec = parse_intelligence({**BASE, "kind": "session.link", "session_id": "sess-2",
+                              "prior_session_id": "sess-1", "basis": ["password_reuse"], "support": SUPPORT})
+    assert rec.support.confidence == 0.7
+    with pytest.raises(ValidationError):
+        parse_intelligence({**BASE, "kind": "session.link", "session_id": "sess-2",
+                            "prior_session_id": "sess-1", "basis": ["password_reuse"]})

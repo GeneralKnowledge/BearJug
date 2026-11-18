@@ -34,8 +34,20 @@ from .events import (
     UploadReceived,
     parse_event,
 )
-from .evidence import EvidenceKind, InlineContent, RawEvidence, StoredContent
-from .intelligence import CampaignLink, Intelligence, SessionAssessment, parse_intelligence
+from .evidence import (
+    EncryptionAlgorithm,
+    EvidenceKind,
+    InlineContent,
+    RawEvidence,
+    StoredContent,
+)
+from .intelligence import (
+    CampaignLink,
+    Intelligence,
+    SessionAssessment,
+    SessionLink,
+    parse_intelligence,
+)
 from .passwords import PasswordRef, password_ref
 
 __all__ = [
@@ -43,6 +55,7 @@ __all__ = [
     "Endpoint",
     "EvidenceRef",
     "EvidenceKind",
+    "EncryptionAlgorithm",
     "InlineContent",
     "StoredContent",
     "RawEvidence",
@@ -71,6 +84,7 @@ __all__ = [
     "Event",
     "parse_event",
     "SessionAssessment",
+    "SessionLink",
     "CampaignLink",
     "Intelligence",
     "parse_intelligence",
