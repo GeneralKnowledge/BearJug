@@ -76,10 +76,12 @@ configuration.
    - Every credential, key, token, password and connection string in a
      profile grants nothing, anywhere.
    - Values must not match real provider formats closely enough to be mistaken
-     for real ones: no `AKIA…`-shaped AWS key IDs, no `ghp_…` tokens, no PEM
-     blocks that parse as real keys. Values carry an explicit decoy marker such
-     as `FAKE_AITO_` or `aito-decoy-`.
-   - The profile tooling refuses to emit a value matching a known secret
+     for real ones by provider validators or secret scanners: no value that
+     passes a real provider's format or checksum, no PEM blocks that parse as
+     real keys.
+   - Values must not advertise the product either. The displayed value and
+     AITO's internal decoy identity are separate (section 5.3).
+   - The profile tooling refuses to emit a value matching a known real secret
      pattern, and CI runs a secret scanner over profiles and fixtures.
 
 3. **All outbound actions are simulated and recorded.**
@@ -104,15 +106,30 @@ AITO plugin is misconfigured**.
 - No host mounts other than its own output volume and the upload quarantine
   directory. No Docker socket. No access to collector internals, credentials
   or configuration.
-- Network egress from the honeypot is denied by default at the firewall. The
-  only allowed path is from a separate shipping component to the private
-  collector endpoint; the honeypot process itself has no route out.
+- Network egress from the honeypot is denied by default at the firewall; the
+  honeypot process has no route out at all.
 - Inbound is limited to the SSH listener.
 
-### 2.3 Security boundary tests
+### 2.3 Sensor-to-collector shipping boundary
+
+Shipping is a **distinct component**, not a loosely defined sidecar:
+
+1. The honeypot writes evidence to a restricted local **spool** (write-only
+   for the honeypot, read-only for the shipper).
+2. A separate **shipper** process, in its own container, reads the spool.
+3. The shipper authenticates to the collector; it is the only thing on the
+   sensor allowed to reach the collector endpoint.
+4. The collector never opens or provides a route back into the sensor.
+5. The shipper treats spool contents as opaque data: it never executes,
+   parses as code, or interprets attacker-supplied content.
+
+### 2.4 Security boundary tests
 
 PR 5 introduces a security test suite that runs in CI against a real sensor
-container. Each guarantee is a test that must pass:
+container. Each guarantee is a test that must pass.
+
+**Status: specified, not yet implemented.** Until these tests exist and pass in
+CI, none of these guarantees should be treated as proven.
 
 | Guarantee | Test |
 |---|---|
@@ -124,6 +141,7 @@ container. Each guarantee is a test that must pass:
 | No access to host mounts, Docker socket or collector internals | From inside the honeypot container, assert the socket and host paths are absent and collector endpoints are unreachable from the honeypot process |
 | Egress firewall holds without Cowrie's help | With a deliberately misconfigured plugin that tries a real connection, assert the firewall blocks it |
 | Synthetic secrets are not real-shaped | Secret scanner over all profiles and fixtures reports nothing |
+| Shipper boundary holds | Collector cannot open a connection to the sensor; shipper never executes spool content (spool seeded with executable payloads and shell metacharacters) |
 
 A failing boundary test blocks merge.
 
@@ -163,11 +181,17 @@ flowchart TD
     J -->|Download payload| K[Record payload request - no fetch]
     J -->|Privilege escalation| L[Simulate result]
     J -->|Persistence attempt| M[Record attempt]
-    K --> N[Private intelligence collector]
-    L --> N
-    M --> N
-    E --> N
+    I --> S[(Restricted local spool)]
+    K --> S
+    L --> S
+    M --> S
+    E --> S
+    S -->|read-only| T[Separate shipper]
+    T -->|authenticated, one-way| N[Private intelligence collector]
 ```
+
+The honeypot only writes to the spool. The shipper is the only component that
+reaches the collector, and nothing routes back into the sensor (section 2.3).
 
 ### Components
 
@@ -178,7 +202,8 @@ flowchart TD
 | Profile generator | Produces several distinct, internally consistent profiles | AITO tool |
 | Profile compiler | Turns a profile into Cowrie artefacts (filesystem, file contents, command outputs, config) | AITO tool |
 | Simulated command handlers | Commands that must answer from the profile (`docker`, `psql`, `aws`, `systemctl`, outbound tools) | Cowrie command plugins |
-| Session recorder | Full session as raw evidence plus normalised events | Cowrie output plugin + TTY logs |
+| Session recorder | Full session as raw evidence, written to the local spool | Cowrie output plugin + TTY logs |
+| Shipper | Reads the spool and ships evidence to the collector; no route back in | Separate AITO component |
 | Intelligence collector | Stores evidence, normalises events, derives intelligence | AITO ingestion + database |
 
 ## 4. Credential policy
@@ -248,7 +273,7 @@ neighbours must all tell the same story.
 | Applications | Customer portal |
 | Internal network | 10.20.0.0/24 |
 | Decoy files | `.env`, backups, Git repositories |
-| Decoy secrets | Marked synthetic values |
+| Decoy secrets | Plausible, non-functional values tracked by internal decoy id |
 | Credential set | Synthetic accounts for this profile only |
 
 ### 5.2 What a profile specifies
@@ -260,7 +285,7 @@ neighbours must all tell the same story.
 - **Network**: interfaces, addresses, routes, DNS, and fictional neighbouring hosts.
 - **Applications**: deployments, config, containers, cron jobs, logs, Git repositories.
 - **Decoy data**: database contents, backups, history files.
-- **Decoy secrets**: marked synthetic values, each with a per-profile decoy id.
+- **Decoy secrets**: displayed values plus their internal decoy ids (section 5.3).
 - **Links**: references to other fictional machines (for example the DB host in
   a web server's `.env`), so profiles can form a fictional network.
 
@@ -296,16 +321,34 @@ APP_ENV=production
 DB_HOST=10.20.0.15
 DB_NAME=customer_portal
 DB_USER=app_service
-DB_PASSWORD=synthetic_fake_value
-AWS_ACCESS_KEY_ID=FAKE_AITO_ACCESS_KEY
+DB_PASSWORD=<generated, plausible, non-functional>
+AWS_ACCESS_KEY_ID=<generated, plausible, fails provider validation>
 ```
 
 When an attacker uses a found secret, for example `psql -h 10.20.0.15` or
 `aws s3 ls`, the simulated handler answers from the profile and records the
-attempt. No connection leaves the sensor. Because decoy secrets carry a decoy
-id, their reuse on another sensor links the two sessions.
+attempt. No connection leaves the sensor.
 
-### 5.3 Generator and validation
+### 5.3 Decoy secrets: internal identity vs displayed value
+
+A decoy secret has two parts:
+
+- **Internal decoy identity**: a unique id AITO uses to track where the secret
+  was planted, seen and used. It lives only in AITO's decoy registry and never
+  needs to appear anywhere in the simulated server.
+- **Displayed synthetic value**: what the attacker sees. It should look
+  ordinary in context (no product names, no `FAKE` markers), but it must be
+  incapable of authenticating anywhere real, and must fail real provider
+  format or checksum validation so secret scanners and providers never treat
+  it as live.
+
+Simulated services recognise displayed values by looking them up in the
+registry, so reuse of a decoy on another sensor or service resolves to its
+decoy id and links the sessions. The exact generation rules per secret type
+(passwords, database URLs, cloud keys, SSH keys, API tokens) are settled in
+PR 9, and every rule must pass the secret checks below.
+
+### 5.4 Generator and validation
 
 The profile generator builds whole fictional environments, not isolated fake
 files: several distinct server types (database, web frontend, CI runner,
@@ -314,11 +357,12 @@ profile can be deployed it must pass:
 
 - **consistency checks**: users, processes, services, network and files agree
   with each other;
-- **secret checks**: all decoy secrets are marked and none match real formats;
+- **secret checks**: every displayed value is registered to a decoy id, none
+  passes real provider validation, and none names the product;
 - **distinctness checks**: sensors in the network don't share a fingerprintable
   profile.
 
-### 5.4 Levels of deceptive access
+### 5.5 Levels of deceptive access
 
 | Level | Name | Contents | Roadmap |
 |---|---|---|---|
@@ -335,26 +379,44 @@ Per session and across sessions, AITO captures:
 - **time between commands**;
 - **failed versus successful simulated operations**;
 - **search patterns and files of interest**;
-- **manual exploration versus automated scripts** (from timing, input cadence,
-  command batching and paste patterns);
+- **likelihood of automation** (from timing, input cadence, command batching
+  and paste patterns), recorded as `automation_likelihood`, `confidence` and
+  `supporting_signals`, never as a definitive human/bot label;
 - tools they tried to install;
 - **credential reuse between sessions**, including reuse of decoy secrets;
 - **persistence attempts** (cron, `authorized_keys`, systemd units, rc files);
 - malware download attempts (URLs recorded, never fetched);
 - **attempts to discover other fictional machines**;
-- **returning to a previously accessed sensor**, and what they do on return;
+- **recurrence**: sessions that may come from the same actor (see below);
 - session duration.
 
 From full sessions AITO builds **behavioural fingerprints**, and from
 fingerprints it correlates sessions into **campaigns**. Headline research
 metric: **post-compromise behaviour**.
 
+### Recurrence is not identity
+
+An IP address is not an identity: attackers change addresses, use proxies,
+share infrastructure and sit behind NAT. AITO keeps these links distinct:
+
+| Link | Meaning |
+|---|---|
+| Source-IP recurrence | Same source address seen again; weakest signal |
+| Behavioural similarity | Similar fingerprints across sessions |
+| Credential or decoy-secret reuse | A credential or decoy found in one session is used in another |
+| Probable campaign association | Several signals together suggest a shared operator or tooling |
+| Confirmed same-session identity | Events within one SSH session; the only certain link |
+
+Every relationship and classification is stored with a **confidence** and its
+**supporting evidence** (references to the events that justify it), never as
+certainty.
+
 ## 7. Event types (normalised tier)
 
 | Event | Key fields |
 |---|---|
 | `auth.attempt` | session, src, username, password reference (see 8.2), decision, rule, policy kind, experiment id |
-| `session.start` / `session.end` | session, src, profile id, account, duration, returning-visitor flag |
+| `session.start` / `session.end` | session, src, profile id, account, duration, source-recurrence flag |
 | `command.input` | session, sequence, parsed command, args, handler, time since previous command |
 | `command.result` | session, sequence, simulated outcome (success/failure), error class |
 | `fs.access` | session, path, operation (read/list/search/write/delete) |
@@ -382,13 +444,13 @@ evidence. Every derived record points back to the evidence it came from.
 
 ### 8.2 Attacker-supplied passwords
 
-- Passwords are **not** stored in plaintext in normalised events or
-  intelligence. Those tiers carry a keyed hash (for reuse correlation) plus
-  coarse features (length, character classes, membership in known wordlists).
-- If plaintext is retained at all, it lives only in raw evidence, encrypted at
-  rest, with access restricted to named research roles and logged.
-- Retention period for plaintext is fixed and short, and shorter than for
-  hashed forms. Exact periods are set in the retention policy (PR 3–4).
+- Default: **keyed hashes** for correlation, plus coarse features (length,
+  character classes, membership in known wordlists). Normalised events and
+  intelligence never hold plaintext.
+- Plaintext is kept only if a specific research need justifies it, only in
+  raw evidence, encrypted at rest, for a very short fixed period, with access
+  restricted to named roles.
+- Every access to and deletion of plaintext evidence is audited.
 
 ### 8.3 Uploaded files
 
@@ -396,7 +458,15 @@ evidence. Every derived record points back to the evidence it came from.
   execute or serve, with sanitised names, content-addressed by hash.
 - Quarantined files are never executed, opened by the sensor, or fetched to
   analyst machines without explicit handling. Access is restricted and logged.
-- Explicit size limits, retention period and deletion process.
+- Explicit size limits, retention period and deletion process; retrieval and
+  deletion are audited.
+
+### 8.4 Decision required before public sensors
+
+The retention policy is drafted in PR 3–4 but must be **decided before any
+public sensor is deployed**, answering: how long raw passwords are kept;
+whether plaintext is needed at all; who can retrieve uploaded files; and how
+access and deletion are audited.
 
 ## 9. Release gate: first end-to-end test
 
@@ -422,8 +492,8 @@ Level 2 and Level 3 complexity.
 
 ## 11. Open questions
 
-- Exact retention periods for plaintext passwords, hashes and uploads, and who
-  may access them.
+- Exact retention periods and access roles (must be decided before public
+  sensors, see 8.4).
 - How many profiles per sensor, and how often to rotate them.
 - Rules for running experimental credential policies (who approves, how long).
 - Legal and hosting review for each region sensors are deployed in.
