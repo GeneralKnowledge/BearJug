@@ -21,3 +21,7 @@ python -m venv .venv && .venv/bin/pip install -e '.[dev]'
 Defining engineering rule: make the deception as convincing as possible to the
 attacker, while making the real infrastructure as inaccessible as possible to
 them.
+
+## Licence
+
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
