@@ -1,0 +1,78 @@
+- name: Docker
+  ansible.builtin.apt:
+    name: [docker.io]
+    state: present
+  when: bearjug_manage_docker
+
+- name: Existing Docker daemon settings
+  ansible.builtin.slurp:
+    src: /etc/docker/daemon.json
+  register: bearjug_docker_existing
+  failed_when: false
+
+# userland-proxy off: published ports are plain DNAT, so Cowrie sees the
+# attacker's real address and no host process relays the traffic.
+- name: Docker daemon settings
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    content: >-
+      {{ ((bearjug_docker_existing.content | default('e30=') | b64decode | from_json)
+          | combine(bearjug_docker_daemon)) | to_nice_json }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart docker
+
+- name: Docker starts after the BearJug firewall
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/docker.service.d/10-bearjug.conf
+    content: |
+      # {{ ansible_managed }}
+      [Unit]
+      Wants=bearjug-firewall.service
+      After=bearjug-firewall.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: [Reload systemd, Restart docker]
+
+- name: Apply Docker changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Docker running
+  ansible.builtin.systemd_service:
+    name: docker.service
+    state: started
+    enabled: true
+
+# The Cowrie network: no masquerade (nothing it sends would be translated to
+# the host's address), no traffic between containers on it. The firewall drops
+# every new connection from its bridge in any case.
+- name: Cowrie network
+  ansible.builtin.command: >-
+    docker network create --driver bridge
+    --subnet {{ bearjug_cowrie_subnet }}
+    --opt com.docker.network.bridge.name={{ bearjug_cowrie_bridge }}
+    --opt com.docker.network.bridge.enable_ip_masquerade=false
+    --opt com.docker.network.bridge.enable_icc=false
+    {{ bearjug_cowrie_network }}
+  register: bearjug_net
+  changed_when: bearjug_net.rc == 0
+  failed_when: bearjug_net.rc != 0 and 'already exists' not in bearjug_net.stderr
+
+- name: Cowrie network settings
+  ansible.builtin.command: docker network inspect {{ bearjug_cowrie_network }}
+  register: bearjug_net_inspect
+  changed_when: false
+
+- name: Cowrie network is the one this role expects
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - net.IPAM.Config[0].Subnet == bearjug_cowrie_subnet
+      - net.Options['com.docker.network.bridge.name'] == bearjug_cowrie_bridge
+      - net.Options['com.docker.network.bridge.enable_ip_masquerade'] == 'false'
+      - not (net.Internal | bool)
+    fail_msg: "Docker network {{ bearjug_cowrie_network }} exists with other settings; remove it and re-run."
+  vars:
+    net: "{{ (bearjug_net_inspect.stdout | from_json)[0] }}"

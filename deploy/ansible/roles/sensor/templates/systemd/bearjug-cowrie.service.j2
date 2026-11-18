@@ -1,0 +1,53 @@
+# {{ ansible_managed }}
+#
+# Cowrie in a locked-down container:
+#   * read-only root filesystem (distroless: no shell), noexec /tmp in memory;
+#   * the bearjug-cowrie account, no capabilities, no-new-privileges;
+#   * only two mounts: its own output on the evidence volume, and its
+#     configuration read-only. No Docker socket, no host secrets;
+#   * its own network, whose every new outbound connection the firewall drops;
+#     --dns 127.0.0.1 stops Docker's resolver from forwarding lookups to the
+#     internet from outside the container;
+#   * memory, CPU and process limits.
+# The disk guard's start gate decides whether it may start at all.
+[Unit]
+Description=BearJug Cowrie honeypot (container)
+Requires=docker.service bearjug-firewall.service bearjug-diskguard.service
+After=docker.service bearjug-firewall.service bearjug-diskguard.service network-online.target
+Wants=network-online.target
+RequiresMountsFor={{ bearjug_evidence_mount }}
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+# Exit 1 skips the start (the unit stays inactive, not failed): the disk
+# guard's rules say Cowrie must stay stopped. Any error also means "no".
+ExecCondition=/usr/sbin/runuser -u bearjug-guard -- {{ bearjug_prefix }}/venv/bin/bearjug-diskguard --gate \
+  --evidence-dir {{ bearjug_evidence_mount }}/guard \
+  --shipper-health {{ bearjug_evidence_mount }}/shipper/shipper-state.health.json \
+  --state {{ bearjug_evidence_mount }}/guard/diskguard-state.json
+# Fail closed without the firewall.
+ExecStartPre=/usr/local/libexec/bearjug/firewall-check
+ExecStartPre=-/usr/bin/docker rm --force bearjug-cowrie
+ExecStart=/usr/bin/docker run --rm --name bearjug-cowrie \
+  --network {{ bearjug_cowrie_network }} --ip {{ bearjug_cowrie_ip }} --dns 127.0.0.1 \
+  --publish {{ bearjug_honeypot_port }}:2222 \
+  --user {{ bearjug_cowrie_uid }}:{{ bearjug_spool_gid }} \
+  --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
+  --cap-drop ALL --security-opt no-new-privileges \
+  --memory {{ bearjug_cowrie_memory }} --memory-swap {{ bearjug_cowrie_memory }} \
+  --cpus {{ bearjug_cowrie_cpus }} --pids-limit {{ bearjug_cowrie_pids_limit }} \
+  --log-driver local --log-opt max-size=10m --log-opt max-file=3 \
+  --volume {{ bearjug_evidence_mount }}/cowrie:/srv/cowrie \
+  --volume /etc/bearjug/cowrie:/cowrie/cowrie-git/etc:ro \
+  {{ bearjug_cowrie_image }}
+ExecStop=/usr/bin/docker stop --time 30 bearjug-cowrie
+TimeoutStopSec=45
+SuccessExitStatus=143
+# Restart after a crash, through the start gate again. A stop by the disk
+# guard or an operator is never undone by systemd.
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

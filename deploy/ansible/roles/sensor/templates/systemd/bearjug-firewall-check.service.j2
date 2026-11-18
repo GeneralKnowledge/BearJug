@@ -1,0 +1,7 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Stop Cowrie if the BearJug firewall is missing
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c '/usr/local/libexec/bearjug/firewall-check || { logger -p user.crit -t bearjug-alert "BearJug firewall table missing: stopping Cowrie"; systemctl stop bearjug-cowrie.service; exit 1; }'

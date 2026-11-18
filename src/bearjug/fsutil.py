@@ -25,9 +25,9 @@ def fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
-def write_private(path: Path, data: bytes | str, *, exclusive: bool = False) -> None:
-    """Atomically and durably write a 0600 file. With ``exclusive``, refuse to
-    replace an existing file."""
+def write_private(path: Path, data: bytes | str, *, exclusive: bool = False, mode: int = 0o600) -> None:
+    """Atomically and durably write a file (0600 unless ``mode`` says
+    otherwise). With ``exclusive``, refuse to replace an existing file."""
     if isinstance(data, str):
         data = data.encode()
     if exclusive and path.exists():
@@ -35,7 +35,7 @@ def write_private(path: Path, data: bytes | str, *, exclusive: bool = False) -> 
     tmp = path.with_name(path.name + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
-        os.fchmod(fd, 0o600)
+        os.fchmod(fd, mode)
         with os.fdopen(fd, "wb") as f:
             f.write(data)
             f.flush()

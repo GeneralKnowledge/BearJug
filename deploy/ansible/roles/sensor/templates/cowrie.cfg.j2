@@ -1,0 +1,46 @@
+# {{ ansible_managed }}
+# BearJug sensor overrides on top of Cowrie's bundled cowrie.cfg.dist.
+# The container's entrypoint refuses to start if any of the safety settings
+# below is missing or changed (see deploy/cowrie/entrypoint.py).
+
+[honeypot]
+sensor_name = {{ bearjug_sensor_id }}
+hostname = {{ bearjug_fake_hostname }}
+backend = shell
+log_path = /srv/cowrie/log
+download_path = /srv/cowrie/downloads
+state_path = /srv/cowrie/state
+ttylog = true
+ttylog_path = /srv/cowrie/tty
+ttylog_limit_size = 10485760
+# Second line of defence behind the disk guard: stop recording TTY logs when
+# less than this is free on the evidence volume.
+ttylog_min_free = {{ bearjug_ttylog_min_free_bytes }}
+download_limit_size = 10485760
+etc_path = etc
+idle_timeout = 180
+authentication_timeout = 120
+logtype = plain
+# Attacker events (logins with passwords, commands) go to cowrie.json on the
+# encrypted evidence volume only, not to the container log on the root disk.
+log_level_cowrie.events = error
+
+[shell]
+bearjug_mem_total_kb = {{ bearjug_fake_mem_total_kb }}
+
+[ssh]
+enabled = true
+listen_endpoints = tcp:2222:interface=0.0.0.0
+version = {{ bearjug_ssh_banner }}
+forwarding = false
+forward_redirect = false
+forward_tunnel = false
+sftp_enabled = false
+
+[telnet]
+enabled = false
+
+[output_jsonlog]
+enabled = true
+logfile = ${honeypot:log_path}/cowrie.json
+epoch_timestamp = false

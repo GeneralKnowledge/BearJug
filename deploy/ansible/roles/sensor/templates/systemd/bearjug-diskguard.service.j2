@@ -1,0 +1,53 @@
+# {{ ansible_managed }}
+# Watches the evidence volume: warns at 70%, stops Cowrie at 80%, starts it
+# again below 60% once shipping is healthy (src/bearjug/diskguard.py). It
+# has no network at all; it reaches systemd over D-Bus, and polkit lets its
+# account start and stop bearjug-cowrie.service and nothing else.
+[Unit]
+Description=BearJug disk guard
+Before=bearjug-cowrie.service
+After=dbus.service polkit.service
+RequiresMountsFor={{ bearjug_evidence_mount }}
+
+[Service]
+Type=simple
+User=bearjug-guard
+Group=bearjug-guard
+ExecStart={{ bearjug_prefix }}/venv/bin/bearjug-diskguard \
+  --evidence-dir {{ bearjug_evidence_mount }}/guard \
+  --shipper-health {{ bearjug_evidence_mount }}/shipper/shipper-state.health.json \
+  --state {{ bearjug_evidence_mount }}/guard/diskguard-state.json \
+  --interval {{ bearjug_guard_interval }} \
+  --stop-command "systemctl --no-ask-password stop bearjug-cowrie.service" \
+  --start-command "systemctl --no-ask-password start bearjug-cowrie.service" \
+  --running-command "systemctl is-active --quiet bearjug-cowrie.service" \
+  --alert-command "logger -p user.crit -t bearjug-alert"
+Restart=always
+RestartSec=5
+
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ReadWritePaths={{ bearjug_evidence_mount }}/guard
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+[Install]
+WantedBy=multi-user.target

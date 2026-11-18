@@ -1,0 +1,7 @@
+# Deploy (or re-apply) a BearJug sensor. Run collector.yml first: it issues
+# the sensor's key and the collector's certificate.
+- name: BearJug sensor
+  hosts: sensors
+  become: true
+  roles:
+    - sensor

@@ -1,0 +1,22 @@
+- name: polkit
+  ansible.builtin.apt:
+    name: [polkitd]
+    state: present
+
+# The disk guard's account may start and stop Cowrie's unit, and nothing else.
+- name: Let the disk guard start and stop Cowrie
+  ansible.builtin.template:
+    src: 50-bearjug-diskguard.rules.j2
+    dest: /etc/polkit-1/rules.d/50-bearjug-diskguard.rules
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Disk guard unit
+  ansible.builtin.template:
+    src: systemd/bearjug-diskguard.service.j2
+    dest: /etc/systemd/system/bearjug-diskguard.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: [Reload systemd, Restart disk guard]

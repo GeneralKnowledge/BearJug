@@ -1130,6 +1130,7 @@ def test_permissions_do_not_depend_on_the_umask(tmp_path, server, cowrie, sensor
         assert mode(data / name) == 0o600, name
     assert mode(tmp_path / "y.key") == 0o600
     assert mode(tmp_path / "shipper-state.json") == 0o600
+    assert mode(tmp_path / "shipper-state.health.json") == 0o640
     assert mode(tmp_path / "dl-loose") == 0o700
     assert {mode(p) for p in (tmp_path / "dl-loose").iterdir()} == {0o600}
 
@@ -1298,4 +1299,5 @@ def test_idle_shipper_still_proves_the_collector_is_reachable(server, cowrie, tm
     shipper = make_shipper(server, cowrie, tmp_path, sensor_key)
     assert shipper.run_once() == 0
     assert json.loads(shipper.health_path.read_text())["ok"] is True
-    assert stat.S_IMODE(shipper.health_path.stat().st_mode) == 0o600
+    # Group-readable for the disk guard's user; it holds no evidence.
+    assert stat.S_IMODE(shipper.health_path.stat().st_mode) == 0o640

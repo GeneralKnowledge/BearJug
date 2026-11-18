@@ -1,0 +1,23 @@
+# CI only: deploy the sensor onto the runner itself.
+all:
+  hosts:
+    ci-sensor:
+      ansible_connection: local
+      ansible_python_interpreter: /usr/bin/python3
+      bearjug_sensor_id: ci-sensor
+      bearjug_secrets_dir: "{{ inventory_dir }}/../ansible/secrets-ci"
+      bearjug_collector_address: 172.31.200.10
+      # TEST-NET-1: nobody in CI is an administrator, so the external machine
+      # must not reach administrative SSH.
+      bearjug_admin_cidrs: ["192.0.2.0/24"]
+      bearjug_evidence_size_mib: 1024
+      bearjug_guard_interval: 5
+      # The runner already has Docker CE.
+      bearjug_manage_docker: false
+      bearjug_sensor_credentials:
+        - username: deploy
+          password: "{{ lookup('env', 'BJ_PASSWORD') }}"
+  children:
+    sensors:
+      hosts:
+        ci-sensor:

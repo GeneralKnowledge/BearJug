@@ -1,0 +1,168 @@
+# The evidence volume: one LUKS2-encrypted ext4 filesystem holding Cowrie's
+# output, the shipper's state and dead letters, and the disk guard's state.
+# It is a separate filesystem, so evidence can never fill the root filesystem
+# (the disk guard refuses to run otherwise), and it is mounted noexec, nodev
+# and nosuid, so nothing on it can be run on the host.
+#
+# The key is a random file on the root disk, read by root only. That protects
+# evidence in snapshots, backups or reuse of the evidence volume (or its image
+# file), not against someone who controls the running sensor. See
+# docs/deployment.md for the alternatives.
+- name: Packages for the evidence volume
+  ansible.builtin.apt:
+    name: [cryptsetup, e2fsprogs]
+    state: present
+
+- name: Directories for the volume and its key
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - /var/lib/bearjug
+    - "{{ bearjug_evidence_keyfile | dirname }}"
+  when: item != "/etc/bearjug"
+
+- name: Evidence volume key
+  ansible.builtin.shell: umask 0377 && head -c 64 /dev/urandom > {{ bearjug_evidence_keyfile }}
+  args:
+    creates: "{{ bearjug_evidence_keyfile }}"
+
+- name: Evidence volume key is root-only
+  ansible.builtin.file:
+    path: "{{ bearjug_evidence_keyfile }}"
+    owner: root
+    group: root
+    mode: "0400"
+
+- name: Preallocated image file (cannot grow)
+  ansible.builtin.command: fallocate -l {{ bearjug_evidence_size_mib }}M {{ bearjug_evidence_image }}
+  args:
+    creates: "{{ bearjug_evidence_image }}"
+  when: bearjug_evidence_backing == "file"
+
+- name: Image file is root-only
+  ansible.builtin.file:
+    path: "{{ bearjug_evidence_image }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when: bearjug_evidence_backing == "file"
+
+- name: Where the encrypted volume lives
+  ansible.builtin.set_fact:
+    bearjug_evidence_source: "{{ bearjug_evidence_image if bearjug_evidence_backing == 'file' else bearjug_evidence_device }}"
+
+- name: Is it already LUKS?
+  ansible.builtin.command: cryptsetup isLuks {{ bearjug_evidence_source }}
+  register: bearjug_is_luks
+  changed_when: false
+  failed_when: false
+
+- name: Refuse to format a device that holds anything
+  ansible.builtin.command: blkid -p {{ bearjug_evidence_source }}
+  register: bearjug_blkid
+  changed_when: false
+  failed_when: bearjug_blkid.rc == 0
+  when: bearjug_is_luks.rc != 0 and bearjug_evidence_backing == "device"
+
+# The key is 64 random bytes, so key stretching adds nothing; PBKDF2 keeps
+# unlocking cheap on a small VPS (argon2's default would take up to 1 GiB).
+- name: Format the evidence volume (LUKS2)
+  ansible.builtin.command: >-
+    cryptsetup luksFormat --batch-mode --type luks2 --pbkdf pbkdf2 --iter-time 200
+    --key-file {{ bearjug_evidence_keyfile }} {{ bearjug_evidence_source }}
+  when: bearjug_is_luks.rc != 0
+  changed_when: true
+
+- name: Unlock at boot
+  ansible.builtin.lineinfile:
+    path: /etc/crypttab
+    create: true
+    owner: root
+    group: root
+    mode: "0600"
+    regexp: "^{{ bearjug_evidence_mapper }}\\s"
+    # nofail: a volume that won't unlock must not stop the machine booting
+    # (and so lock out administration). Cowrie, the shipper and the disk
+    # guard require the mount, so none of them starts without it.
+    line: "{{ bearjug_evidence_mapper }} {{ bearjug_evidence_source }} {{ bearjug_evidence_keyfile }} luks,nofail"
+  notify: Reload systemd
+
+- name: Unlock now
+  ansible.builtin.command: >-
+    cryptsetup open --key-file {{ bearjug_evidence_keyfile }}
+    {{ bearjug_evidence_source }} {{ bearjug_evidence_mapper }}
+  args:
+    creates: /dev/mapper/{{ bearjug_evidence_mapper }}
+
+- name: Existing filesystem?
+  ansible.builtin.command: blkid -o value -s TYPE /dev/mapper/{{ bearjug_evidence_mapper }}
+  register: bearjug_evidence_fs
+  changed_when: false
+  failed_when: false
+
+- name: Create the filesystem
+  ansible.builtin.command: mkfs.ext4 -q -L bearjug-evidence -m 1 /dev/mapper/{{ bearjug_evidence_mapper }}
+  when: bearjug_evidence_fs.stdout | trim == ""
+  changed_when: true
+
+- name: Mount point
+  ansible.builtin.file:
+    path: "{{ bearjug_evidence_mount }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0711"
+
+- name: Mount at boot (noexec, nodev, nosuid)
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    regexp: "^/dev/mapper/{{ bearjug_evidence_mapper }}\\s"
+    line: "/dev/mapper/{{ bearjug_evidence_mapper }} {{ bearjug_evidence_mount }} ext4 defaults,nodev,nosuid,noexec,nofail,x-systemd.device-timeout=60s 0 2"
+  notify: Reload systemd
+
+- name: Apply systemd changes before mounting
+  ansible.builtin.meta: flush_handlers
+
+- name: Mount now
+  ansible.builtin.command: mount {{ bearjug_evidence_mount }}
+  register: bearjug_mount
+  changed_when: bearjug_mount.rc == 0
+  failed_when: bearjug_mount.rc != 0 and 'already mounted' not in bearjug_mount.stderr
+  when: ansible_facts.mounts | selectattr('mount', 'equalto', bearjug_evidence_mount) | list | length == 0
+
+- name: Volume root
+  ansible.builtin.file:
+    path: "{{ bearjug_evidence_mount }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0711"
+
+# Layout and permissions (design 2.3, ingestion.md "Evidence on the sensor"):
+#   cowrie/{log,tty,downloads}  Cowrie writes (2770, files 0640 via umask 027);
+#                               the shipper reads and removes acknowledged files
+#   cowrie/state                Cowrie's SSH host keys; Cowrie only
+#   shipper/                    shipper state and dead letters; the disk guard
+#                               reads the health file through the group
+#   guard/                      disk guard state; guard only
+- name: Evidence directories
+  ansible.builtin.file:
+    path: "{{ bearjug_evidence_mount }}/{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: cowrie, owner: root, group: bearjug-spool, mode: "0750"}
+    - {path: cowrie/log, owner: bearjug-cowrie, group: bearjug-spool, mode: "2770"}
+    - {path: cowrie/tty, owner: bearjug-cowrie, group: bearjug-spool, mode: "2770"}
+    - {path: cowrie/downloads, owner: bearjug-cowrie, group: bearjug-spool, mode: "2770"}
+    - {path: cowrie/state, owner: bearjug-cowrie, group: bearjug-cowrie, mode: "0700"}
+    - {path: shipper, owner: bearjug-shipper, group: bearjug-guard, mode: "2750"}
+    - {path: guard, owner: bearjug-guard, group: bearjug-guard, mode: "0700"}
+  loop_control:
+    label: "{{ item.path }}"

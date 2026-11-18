@@ -1,0 +1,61 @@
+# --- required (no defaults): set these in the inventory ----------------------
+# bearjug_sensor_id: sensor-1
+# bearjug_collector_address: 198.51.100.20   (IPv4)
+# bearjug_admin_cidrs: ["203.0.113.7/32"]
+# bearjug_sensor_credentials: [{username: deploy, password: "..."}]
+
+# --- collector -----------------------------------------------------------------
+bearjug_collector_port: 8443
+# Name the shipper uses for the collector (pinned in /etc/hosts, so shipping
+# never depends on DNS) and that the collector's certificate is issued for.
+bearjug_collector_name: collector.bearjug.internal
+bearjug_secrets_dir: "{{ inventory_dir }}/secrets"
+
+# --- network -------------------------------------------------------------------
+bearjug_honeypot_port: 22
+bearjug_admin_ssh_port: 22022
+bearjug_admin_permit_root_login: prohibit-password
+bearjug_manage_admin_ssh: true
+bearjug_cowrie_network: bearjug-cowrie
+bearjug_cowrie_bridge: bj-cowrie
+bearjug_cowrie_subnet: 172.31.254.0/29
+bearjug_cowrie_ip: 172.31.254.2
+
+# --- evidence volume (policy: 12 GiB, its own encrypted filesystem) -------------
+bearjug_evidence_size_mib: 12288
+# "file": a preallocated LUKS image on the root disk (for single-disk VPSes;
+# it can't grow, so evidence still can't fill the root filesystem).
+# "device": a dedicated block device, e.g. the provider's extra volume. It must
+# be blank: the role refuses to format a device that has any signature.
+bearjug_evidence_backing: file
+bearjug_evidence_image: /var/lib/bearjug/evidence.img
+bearjug_evidence_device: ""
+bearjug_evidence_mount: /srv/bearjug/evidence
+bearjug_evidence_mapper: bearjug-evidence
+bearjug_evidence_keyfile: /etc/bearjug/evidence.key
+
+# --- Cowrie --------------------------------------------------------------------
+bearjug_cowrie_image: bearjug/cowrie:3.1.7-bj1
+bearjug_fake_hostname: prod-db-01
+bearjug_fake_mem_total_kb: 16365916
+bearjug_ssh_banner: SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.5
+bearjug_ttylog_min_free_bytes: 268435456
+bearjug_cowrie_memory: 512m
+bearjug_cowrie_cpus: "1.0"
+bearjug_cowrie_pids_limit: 256
+
+# --- Docker --------------------------------------------------------------------
+# Install Ubuntu's docker.io. Set false if Docker is already installed.
+bearjug_manage_docker: true
+bearjug_docker_daemon:
+  userland-proxy: false
+  icc: false
+  no-new-privileges: true
+  live-restore: false
+  log-driver: local
+  log-opts:
+    max-size: 10m
+    max-file: "3"
+
+# --- disk guard (policy defaults live in src/bearjug/policy.py) -----------------
+bearjug_guard_interval: 15

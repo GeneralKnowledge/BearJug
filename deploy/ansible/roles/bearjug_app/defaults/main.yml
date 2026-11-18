@@ -1,0 +1,3 @@
+# The BearJug repository on the machine running Ansible.
+bearjug_source_dir: "{{ playbook_dir }}/../.."
+bearjug_prefix: /opt/bearjug

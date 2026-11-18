@@ -1,0 +1,68 @@
+- name: nftables
+  ansible.builtin.apt:
+    name: [nftables]
+    state: present
+
+- name: Firewall rules directory
+  ansible.builtin.file:
+    path: /etc/bearjug/nftables
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Firewall rules
+  ansible.builtin.template:
+    src: sensor.nft.j2
+    dest: /etc/bearjug/nftables/sensor.nft
+    owner: root
+    group: root
+    mode: "0600"
+    validate: nft -c -f %s
+  notify: Reload firewall
+
+- name: BearJug helper scripts directory
+  ansible.builtin.file:
+    path: /usr/local/libexec/bearjug
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Firewall check script
+  ansible.builtin.copy:
+    src: firewall-check
+    dest: /usr/local/libexec/bearjug/firewall-check
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Firewall units
+  ansible.builtin.template:
+    src: "systemd/{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - bearjug-firewall.service
+    - bearjug-firewall-check.service
+    - bearjug-firewall-check.timer
+  notify: Reload systemd
+
+- name: Apply systemd changes
+  ansible.builtin.meta: flush_handlers
+
+# Loaded before Docker starts (and before the Cowrie network exists), so there
+# is never a moment when Cowrie runs without it.
+- name: Firewall loaded and enabled at boot
+  ansible.builtin.systemd_service:
+    name: bearjug-firewall.service
+    state: started
+    enabled: true
+
+- name: Firewall watchdog
+  ansible.builtin.systemd_service:
+    name: bearjug-firewall-check.timer
+    state: started
+    enabled: true
