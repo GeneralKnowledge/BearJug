@@ -6,6 +6,7 @@ happened" means the boundary held, not that the test environment was broken.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import time
 
@@ -221,7 +222,10 @@ print(json.dumps(out))
 def test_egress_firewall_holds_without_cowrie(sink):
     """A deliberately network-capable program on Cowrie's network (the same
     image, network and DNS settings as Cowrie) gets nothing out."""
-    gateway = json.loads(sh("docker", "network", "inspect", COWRIE_NETWORK).stdout)[0]["IPAM"]["Config"][0]["Gateway"]
+    ipam = json.loads(sh("docker", "network", "inspect", COWRIE_NETWORK).stdout)[0]["IPAM"]["Config"][0]
+    # Docker records the gateway only when it was given explicitly; otherwise
+    # it is the subnet's first address.
+    gateway = ipam.get("Gateway") or str(next(ipaddress.ip_network(ipam["Subnet"]).hosts()))
     code = (CANARY.replace('"SINK"', repr(SINK)).replace('"COLLECTOR"', repr(COLLECTOR_ADDR))
             .replace("COLLECTOR_PORT", str(COLLECTOR_PORT)).replace("ADMIN_PORT", str(ADMIN_PORT))
             .replace('"GATEWAY"', repr(gateway)))
