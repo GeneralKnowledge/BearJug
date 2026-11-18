@@ -25,14 +25,14 @@ reimplement, and run them only as separate processes.
 
 | Tool | Use directly | Adapt | Learn from | Duplicates BearJug | Dangerous boundary |
 |---|---|---|---|---|---|
-| **Cowrie** | SSH protocol, emulated shell, per-session fake FS, TTY logs, JSON events, HASSH/JA4SSH | Command set (overlay of BearJug command modules), config, userdb | Event pipeline design | Output plugins (Elastic, Postgres, S3, MISP…), OCSF/CEF formatters | Real-fetch `wget`/`curl`/`ftpget`/`tftp`/`nc`; `forwarding = true` by default; proxy/pool backends; LLM backend; host `/proc/meminfo` read by `free`; `pickle.load` of the FS file |
+| **Cowrie** | SSH protocol, emulated shell, per-session fake FS, TTY logs, JSON events, HASSH | Command set (overlay of BearJug command modules), config, userdb | Event pipeline design | Output plugins (Elastic, Postgres, S3, MISP…), OCSF/CEF formatters | Real-fetch `wget`/`curl`/`ftpget`/`tftp`/`nc`; `forwarding = true` by default; proxy/pool backends; LLM backend; host `/proc/meminfo` read by `free`; `pickle.load` of the FS file |
 | **T-Pot** | Nothing | Nothing (GPL-3) | **Cowrie persona compiler** (closest prior art to our profile compiler), container hardening, sensor/hive split | ELK stack, attack map, ewsposter = our collector and dashboard | Needs unfiltered outbound internet; 8–16 GB RAM, 128–256 GB disk. Not for the 8 GB Dell |
 | **OpenCanary** | Low-interaction decoy listeners (after the release gate) | Small adapter from its JSON log | Module structure | None | `portscan` runs `iptables` via `subprocess` (needs root/NET_ADMIN); `llmnr`/`snmp` use scapy and `llmnr` sends packets; `smb` drives real Samba; shipped compose uses `network_mode: host` |
 | **Dionaea** | No | No | Protocol list for later expansion | None | Built to fetch malware and run shellcode emulation (libemu); unmaintained since 2021 |
 | **Canarytokens** | No | No | **Catalogue of decoy types** for the decoy registry | Alerting/webhooks | Its AWS key tokens are **real IAM keys**; every token needs a public DNS/HTTP callback server. Both conflict with safety constraint 2 |
 | **MISP** | No server yet | Export format only | Event/attribute/object/sighting model, TLP tags | Correlation engine | Cowrie's MISP output and MISP's `cowrie` object both carry plaintext `password` |
 | **OpenCTI** | No | STIX 2.1 export only | Relationship model with confidence and provenance | Graph/correlation | Heavy stack (OpenSearch, Redis, RabbitMQ, S3) |
-| **Suricata / Zeek** | Later, pick one | Adapter from EVE JSON / Zeek JSON | `community_id` for joining flows | SSH fingerprinting (Cowrie already does HASSH/JA4SSH) | Suricata inline/IPS mode can drop traffic; run passive only |
+| **Suricata / Zeek** | Later, pick one | Adapter from EVE JSON / Zeek JSON | `community_id` for joining flows | SSH fingerprinting (Cowrie already computes HASSH) | Suricata inline/IPS mode can drop traffic; run passive only |
 
 ## 2. Cowrie in depth
 
@@ -101,7 +101,7 @@ Things a profile can't control today without code:
 | `free` | Reads the **sensor host's real** `/proc/meminfo` (`commands/free.py`). Leaks the real RAM | BearJug module reading profile values |
 | `ifconfig`, `netstat -r` | MAC is random per process start; addresses derive from the listening IP or `fake_addr` | Module reading `network.yaml` |
 | `systemctl`, `ss`, `docker`, `psql`, `aws`, `ip` | Not implemented, or txtcmd output that ignores arguments | Modules (design already plans these) |
-| Outbound tools | `wget`, `curl`, `ftpget`, `tftp`, `nc` make **real connections** to any globally routable IP (`core/network.py` blocks only non-global ranges) | Replace all five, not just `wget`/`curl` |
+| Outbound tools | `wget`, `curl`, `ftpget`, `tftp`, `nc` make **real connections** to any globally routable IP (`core/network.py` blocks only non-global ranges) | Replace all five with simulated versions, for realism and clean events. This is **not** the safety guarantee; see 2.8 |
 | Sensor name in events | `sensor_name` falls back to `socket.gethostname()` | Always set it |
 
 Python command modules are registered from a **hard-coded list** in
@@ -181,6 +181,60 @@ boundary (attacker input leaves the sensor). **Keep it out of the build.** The
 interesting use later is offline: generating profile content at compile time,
 reviewed and then frozen, so runtime stays deterministic.
 
+### 2.8 Network isolation is the guarantee, not the command list
+
+Finding five real-fetch commands shows why command replacement cannot be the
+safety boundary: the next Cowrie release, an output plugin or a config change
+can add a sixth path, and nobody would notice. Replacing commands keeps the
+illusion convincing. The **network boundary** keeps the sensor safe, and it must
+hold even if Cowrie tries to connect out:
+
+- **Default-deny egress at the network boundary.** The honeypot container sits
+  on an internal-only network with no route out (no default gateway, no DNS),
+  plus a host firewall rule dropping anything from it. Nothing in Cowrie's
+  config is relied on for this.
+- **No path to the private collector from the honeypot process.** The
+  collector address isn't routable from the honeypot's network.
+- **A separate, narrowly scoped shipper** in its own container, the only
+  component allowed to reach the collector, and only its ingestion endpoint
+  (design 2.3).
+- **Tests that attack the boundary**, run in CI against the real container:
+  the five tools against a test sink; the same through `bash -c`, `$(…)`,
+  backticks, `python -c` and `perl -e`; SSH `direct-tcpip` and remote
+  forwards; and a deliberately added Cowrie command that opens a raw socket.
+  The canary command matters most: it proves the network holds when Cowrie
+  doesn't. Each test asserts nothing reached the sink and the collector stayed
+  unreachable.
+
+The design doc already specifies most of this (2.2–2.4). The audit's point is
+that PR 5 must deliver the network boundary and its tests, not only the
+overlay.
+
+### 2.9 The FoxIO-licensed code can be excluded
+
+Cowrie's own code is BSD-3-Clause, but `src/cowrie/vendor/ja4/` holds FoxIO
+code. FoxIO License 1.1 allows **non-commercial use only**, and excludes
+offering the software as a hosted service.
+
+| File | Licence (SPDX header) | Used by Cowrie at runtime? |
+|---|---|---|
+| `vendor/ja4/ja4.py` (JA4 TLS) | BSD-3-Clause | No |
+| `vendor/ja4/common.py` | BSD-3-Clause **AND** FoxIO-1.1 | Yes: imported by `core/fingerprint.py` |
+| `vendor/ja4/ja4h.py`, `ja4ssh.py`, `ja4x.py` | FoxIO-1.1 | No: nothing outside `vendor/` imports them |
+| `core/fingerprint.py` (JA4/JA4H for forwarded traffic) | Headed BSD-3-Clause, notes FoxIO copyright; implements JA4H, which FoxIO lists under its licence | Only from `ssh/forwarding.py` and `ssh_proxy/` |
+
+So the FoxIO code only runs to fingerprint **traffic inside SSH forwarding
+channels** (and in the proxy backend). We turn forwarding off and don't use the
+proxy, so we lose nothing. SSH client fingerprinting (HASSH) is separate BSD
+code in `core/utils.py`.
+
+To exclude it rather than just never run it: the overlay deletes
+`src/cowrie/vendor/ja4/` and replaces `core/fingerprint.py` with a stub that
+returns no fingerprint, then a test asserts no file in the image carries a
+`LicenseRef-FoxIO` header. That's a small, auditable patch. It's not legal
+advice: before BearJug is offered commercially or as a service, someone should
+confirm this reading.
+
 ## 3. T-Pot: the persona compiler already exists (in GPL form)
 
 T-Pot's Cowrie image (`docker/cowrie/dist/`) contains:
@@ -254,9 +308,10 @@ Cowrie + overlay (safe outbound tools, free, ifconfig/ip, netstat/ss, systemctl,
   -> adapter -> RawEvidence -> Events -> Intelligence
 ```
 
-Cowrie is a single Python process (not measured here, but far below T-Pot's 8 GB
-sensor minimum), so this should fit on the 8 GB Dell alongside
-the collector. Add OpenCanary after the release gate, then one of Suricata or
+The sensor and the collector are **separate security zones on separate
+machines**. Saving a machine isn't worth weakening that. The 8 GB Dell is for
+local development and benchmarking Cowrie (memory, sessions per second),
+not the deployment target. Add OpenCanary after the release gate, then one of Suricata or
 Zeek, then a MISP/STIX export file. T-Pot, Dionaea, OpenCTI and LLM mode stay
 off the roadmap.
 
@@ -264,7 +319,7 @@ off the roadmap.
 
 | PR | Change |
 |---|---|
-| 5 | Pin a Cowrie commit and add the overlay mechanism (registers BearJug command modules). Replace all five real-fetch tools (`wget`, `curl`, `ftpget`, `tftp`, `nc`), not only `wget`/`curl`. Config hardening list: `backend = shell`, `forwarding`/`forward_redirect`/`forward_tunnel` off, every output plugin except jsonlog off, `sensor_name` set, fail closed without a compiled `userdb.txt`. Add boundary tests: `free` doesn't show host RAM, sensor events don't contain the host name |
+| 5 | **Egress boundary first:** honeypot on an internal-only network with default-deny egress, no route to the collector, shipper as the only component reaching the collector, and CI boundary tests including a deliberately network-capable canary command (2.8). Then: pin a Cowrie commit and add the overlay (registers BearJug command modules, removes FoxIO code, 2.9). Replace all five real-fetch tools (`wget`, `curl`, `ftpget`, `tftp`, `nc`) for realism. Config hardening: `backend = shell`, `forwarding`/`forward_redirect`/`forward_tunnel` off, every output plugin except jsonlog off, `sensor_name` set, fail closed without a compiled `userdb.txt`. Add boundary tests: `free` doesn't show host RAM, sensor events don't contain the host name |
 | 6 | Start with a compiled exact-match `userdb.txt`; custom auth class only if needed. Compiler rejects passwords with `*`, `!`, `/…/` or `:` |
 | 7 | Scope it concretely as "compile profiles to `fs.pickle` (with embedded contents), txtcmds, `cmdoutput.json`, `cowrie.cfg`, `userdb.txt`, plus a collector manifest". Add a pickle opcode allowlist check, T-Pot-style fingerprint-marker validation, and a "boots in pinned Cowrie and matches the profile" test |
 | 9 | Use the Canarytokens type list for the decoy registry. Off-sensor beacons stay out unless decided separately |
@@ -274,8 +329,10 @@ off the roadmap.
 
 ## 8. Open questions for Reuben
 
-- **BearJug's licence.** None yet. Matters if any GPL code is ever copied in,
-  and for the vendored JA4+ code in Cowrie (FoxIO 1.1 is non-commercial).
+- **BearJug's licence.** None yet, so nobody has permission to reuse the
+  code. Decide before implementation starts. Whatever is chosen, GPL code
+  isn't copied in; Cowrie stays a separate BSD dependency with FoxIO code
+  removed (2.9).
 - **Persistent per-attacker filesystem.** Cowrie discards a session's changes
   at logout. Reconnects see the pristine profile. Fine for the MVP; Level 3
   "returning sessions" would need our own state.
