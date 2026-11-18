@@ -6,14 +6,15 @@ and [tooling audit section 2.6](research/tooling-audit.md).
 
 ```
 Cowrie (honeypot)                    shipper (own container)                 collector (separate machine)
-  writes its own output  --ro mount-->  reads, hashes, signs  --HTTPS POST-->  verifies, encrypts, stores
+  writes its own output  --mount----->  reads, hashes, signs  --HTTPS POST-->  verifies, encrypts, stores
   cowrie.json, tty/, downloads/         never executes content                never connects out
 ```
 
 ## The spool is Cowrie's own output
 
 BearJug doesn't add a spool format. Cowrie already writes everything we need,
-and the shipper reads it from a read-only mount:
+and the shipper reads it from a mount it can't write files into (see
+"Evidence on the sensor" for the one exception, removing acknowledged files):
 
 | Cowrie output | Shipped as | When it is shipped |
 |---|---|---|
@@ -33,9 +34,9 @@ can't point the shipper at something outside the spool.
   files, and never parses, executes or interprets them;
 * only makes outbound HTTPS requests to one collector URL, and never listens;
 * holds only its own sensor key;
-* keeps its progress (log offsets by inode, so rotation is safe; names already
-  shipped) in its own state file, outside the spool. Losing that file only
-  causes resends, which the collector recognises.
+* keeps its progress (log offsets by inode, so rotation is safe; files the
+  collector acknowledged) in its own state file (0600), outside the spool.
+  Losing that file only causes resends, which the collector recognises.
 
 If the collector is down, rate-limits it or refuses authentication, it stops
 and retries next pass. If the collector permanently refuses one item (bad
@@ -57,8 +58,90 @@ never parses or runs the `.bin` files.
   every pass.
 
 These entries can hold attacker passwords in the clear, just like Cowrie's own
-log next to them. They sit on the sensor under the same protection and are
-removed on the same kind of schedule.
+log. They need the same protection as the rest of the evidence on the sensor
+(next section).
+
+## Evidence on the sensor
+
+Cowrie's output, the shipper's state and the dead-letter directory all hold
+attacker material in the clear: attempted passwords, keystroke recordings and
+captured files. The sensor is the machine on the internet, so this material is
+kept there as briefly and as tightly as possible.
+
+### Removing acknowledged evidence
+
+With `--delete-acknowledged`, each pass removes from the spool:
+
+| What | When |
+|---|---|
+| a TTY log or download | once the collector's acknowledgement is saved in the state file |
+| a rotated JSON log (`cowrie.json.<date>`) | once every line in it has been acknowledged, and it hasn't changed for 60 seconds |
+| refused evidence copied to the dead-letter directory | at once: the dead-letter copy is now the only one |
+| refused evidence that could not be copied (dead-letter full, or over the size limit) | after `--unpreserved-days` (default 30) |
+
+The live `cowrie.json` is never removed (Cowrie is writing it), nor is
+anything the collector hasn't acknowledged.
+
+**Crash safety.** An acknowledgement is a 2xx reply (`stored`, `duplicate` or
+`deleted`). It is written to the state file (fsync, then atomic rename) before
+anything can be removed, and removal decisions are made from the state file
+on disk, not from memory. So:
+
+* collector unreachable, or the reply lost after the collector stored it: no
+  acknowledgement, nothing removed; the next pass resends and the collector
+  answers `duplicate`, which counts;
+* killed after the reply but before the state was saved: same as a lost reply;
+* killed after the state was saved but before the file was removed: the next
+  pass removes it without resending;
+* a rotated log that was only partly shipped: kept until the rest is
+  acknowledged.
+
+Tests cover each of these.
+
+Removing files means the shipper needs permission to delete entries in
+Cowrie's output directories, not just read them. The intended setup (PR 5):
+Cowrie owns the directories, the shipper's user is in their group, directories
+are `2770` and files `0640`. The shipper still can't change any file's
+contents, and it never creates files there. Without `--delete-acknowledged`
+the mount can stay fully read-only, and the spool has to be cleared some other
+way.
+
+### Size limits on the sensor
+
+| What | Limit |
+|---|---|
+| TTY logs | Cowrie's `ttylog_limit_size` (ends the session) and `ttylog_min_free` (stops recording when the disk is low) |
+| downloads | Cowrie's `download_limit_size` |
+| one item the shipper will send | 32 MiB; larger ones are dead-lettered as metadata |
+| dead-letter directory | `--dead-letter-max-mb` (256), `--dead-letter-days` (30) |
+| the whole spool | the shipper logs a warning every pass while it holds more than `--spool-warn-mb` (512). That means the collector isn't acknowledging; unacknowledged evidence is never removed to make room |
+
+The evidence volume should also be its own filesystem or have a quota, so a
+full spool can't fill the sensor's root filesystem.
+
+### Permissions
+
+The shipper creates its state file `0600` and the dead-letter directory `0700`
+with `0600` files. These modes are set explicitly, not left to the umask, and
+a test checks them with a umask of 0. Cowrie creates its own output, so the
+shipper can't set those permissions. Instead it logs a warning for any spool
+file other users can read. Run Cowrie with `umask 027` so its files come out
+`0640`.
+
+### Encryption at rest on the sensor
+
+This is a deployment requirement (PR 5), not something the shipper can do:
+Cowrie writes plaintext. Put Cowrie's output, the shipper state and the
+dead-letter directory on one volume that is encrypted at rest (LUKS/dm-crypt,
+or the provider's encrypted block storage). That protects against disk
+snapshots, backups, and a provider reusing a disk. It does not protect against
+someone who controls the running sensor, which is why acknowledged evidence is
+removed promptly and the retention limits above are short.
+
+**Before any public sensor**, decide these values. The current numbers are
+placeholders: unpreserved evidence (30 days), dead-letter retention (30 days)
+and size (256 MiB). They go with the collector's retention decision (design
+8.4).
 
 ## Wire protocol
 
@@ -135,12 +218,16 @@ A collector data directory holds:
 
 | File | What |
 |---|---|
-| `config.json` | retention periods, size limit, who may read sensitive evidence |
+| `config.json` (0600) | retention periods, size limit, who may read sensitive evidence |
 | `evidence-keys.json` (0600) | AES-256-GCM evidence keys by `key_id`, and which is active |
 | `sensors.json` (0600) | one authentication key per sensor |
 | `evidence.db` (0600) | SQLite: one `RawEvidence` record per row (metadata only), the audit log, sensor last-seen, integrity issues |
-| `blobs/` | the original bytes of every record, encrypted |
-| `orphans/` | encrypted blobs found without a record after a crash (see crash recovery) |
+| `blobs/` (0700, files 0600) | the original bytes of every record, encrypted |
+| `orphans/` (0700) | encrypted blobs found without a record after a crash (see crash recovery) |
+
+The data directory itself is `0700`. Every mode here is set explicitly by the
+code, so it doesn't depend on the umask, and a test checks this with a umask
+of 0.
 
 * **Everything is encrypted**, sensitive or not, with AES-256-GCM. The
   associated data binds each blob to its evidence id and digest, so a blob
@@ -213,9 +300,10 @@ without re-encrypting anything.
 ### Retention
 
 **Draft retention policy**: sensitive evidence 30 days, everything else 365
-days, 32 MiB per item. These are placeholders. Design section 8.4 requires
-the real values, and who may read sensitive evidence, to be decided before any
-public sensor is deployed.
+days, 32 MiB per item. **These are placeholders, and a decision is required
+before deployment.** Design section 8.4 requires the real values, who may
+read sensitive evidence, and the sensor-side limits above to be decided
+before any public sensor is deployed.
 
 ## Trying it locally
 
@@ -231,7 +319,8 @@ bearjug-collector --data ./collector serve --port 8443 --tls-cert tls.crt --tls-
 bearjug-shipper --sensor-id sensor-1 --key-file sensor-1.key \
   --collector https://localhost:8443 --ca-file tls.crt \
   --log-dir var/log/cowrie --tty-dir var/lib/cowrie/tty \
-  --download-dir var/lib/cowrie/downloads --state shipper-state.json
+  --download-dir var/lib/cowrie/downloads --state shipper-state.json \
+  --delete-acknowledged
 
 bearjug-collector --data ./collector list
 bearjug-collector --data ./collector check
@@ -239,9 +328,8 @@ bearjug-collector --data ./collector check
 
 ## Not in this PR
 
-* Network isolation, containers, the read-only mount and the reverse proxy
-  configuration itself: PR 5, which also turns the shipper's boundary into
-  tests against real containers.
+* Network isolation, containers, the spool mount and its permissions, the
+  encrypted evidence volume and the reverse proxy configuration itself: PR 5,
+  which also turns the shipper's boundary into tests against real containers.
 * Normalising Cowrie events into canonical events, and keyed password hashes.
-* Clearing shipped files out of Cowrie's output directories on the sensor.
 * Evidence hash chaining.

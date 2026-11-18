@@ -19,6 +19,7 @@ HEARTBEAT_SECONDS = 2.0
 
 def _write_key(path: Path, key: bytes) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(key.hex() + "\n")
 

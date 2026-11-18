@@ -115,7 +115,8 @@ AITO plugin is misconfigured**.
 Shipping is a **distinct component**, not a loosely defined sidecar:
 
 1. The honeypot writes evidence to a restricted local **spool** (write-only
-   for the honeypot, read-only for the shipper).
+   for the honeypot, read-only for the shipper apart from removing files the
+   collector has acknowledged; see [ingestion.md](../ingestion.md)).
 2. A separate **shipper** process, in its own container, reads the spool.
 3. The shipper authenticates to the collector; it is the only thing on the
    sensor allowed to reach the collector endpoint.

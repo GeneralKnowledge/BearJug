@@ -41,6 +41,7 @@ from ..schema.evidence import (
 )
 from ..wire import ShipMeta, evidence_id
 from .keys import (
+    _write_private,
     EVIDENCE_KEYS,
     SENSORS,
     EvidenceKeyring,
@@ -192,7 +193,15 @@ class Settings:
         return cls(**raw)
 
     def save(self, path: Path) -> None:
-        path.write_text(json.dumps(self.__dict__, indent=2) + "\n")
+        _write_private(path, json.dumps(self.__dict__, indent=2) + "\n")
+
+
+def _private_dir(path: Path) -> Path:
+    """Create a directory only the collector's user can enter. The mode is
+    set explicitly, so it doesn't depend on the umask."""
+    path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+    return path
 
 
 def _ts(dt: datetime) -> str:
@@ -204,9 +213,8 @@ def _now() -> datetime:
 
 
 def init_data_dir(root: Path) -> None:
-    root.mkdir(parents=True, exist_ok=True)
-    os.chmod(root, 0o700)
-    (root / BLOBS).mkdir(exist_ok=True)
+    _private_dir(root)
+    _private_dir(root / BLOBS)
     if not (root / CONFIG).exists():
         Settings().save(root / CONFIG)
     if not (root / EVIDENCE_KEYS).exists():
@@ -219,7 +227,8 @@ class Store:
         self.root = root
         self.settings = Settings.load(root / CONFIG)
         self.blobs = root / BLOBS
-        self.blobs.mkdir(exist_ok=True)
+        _private_dir(root)
+        _private_dir(self.blobs)
         self._lock = threading.RLock()
         self._keyring_sig: tuple | None = None
         self._sensors_sig: tuple | None = None
@@ -418,9 +427,11 @@ class Store:
                 ),
             )
             path = self._blob_path(eid)
-            path.parent.mkdir(exist_ok=True)
+            _private_dir(path.parent)
             tmp = path.with_name(path.name + ".tmp")
-            with open(tmp, "wb") as f:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as f:
                 f.write(blob)
                 f.flush()
                 os.fsync(f.fileno())
@@ -559,7 +570,7 @@ class Store:
                 row = rows.get(path.name)
                 if row is None:
                     orphans = self.root / ORPHANS
-                    orphans.mkdir(exist_ok=True)
+                    _private_dir(orphans)
                     os.replace(path, orphans / path.name)
                     report.orphans_quarantined.append(path.name)
                     self._audit("reconcile", "orphan-quarantined", path.name, "encrypted blob had no record")

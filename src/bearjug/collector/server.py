@@ -10,8 +10,9 @@ a client can cost it (see ``docs/ingestion.md``):
 
 * at most ``max_concurrent_requests`` connections are served; extra ones are
   closed before anything is read;
-* every connection has a hard deadline and a per-read idle timeout, so a
-  client sending slowly can't hold a slot;
+* every connection has a hard deadline, starting at accept and covering the
+  TLS handshake, plus a per-read idle timeout, so a client sending slowly
+  can't hold a slot;
 * each client IP has a request rate limit, and a much tighter limit on failed
   authentication;
 * everything that can be checked before the body (path, size, metadata, a
@@ -99,23 +100,12 @@ class _Handler(BaseHTTPRequestHandler):
     sys_version = ""
 
     def setup(self) -> None:
-        # Per-read timeout on the socket, plus a hard deadline that closes the
-        # connection however slowly the client trickles bytes in.
+        # Per-read timeout on the socket. The hard deadline is started by the
+        # server before the TLS handshake (see process_request_thread).
         self.timeout = self.server.store.settings.idle_timeout_seconds
         super().setup()
-        self._deadline = threading.Timer(self.server.store.settings.request_deadline_seconds, self._expire)
-        self._deadline.daemon = True
-        self._deadline.start()
-
-    def _expire(self) -> None:
-        log.warning("closing connection from %s: request deadline passed", self.client_address[0])
-        try:
-            self.connection.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
 
     def finish(self) -> None:
-        self._deadline.cancel()
         try:
             super().finish()
         except OSError:
@@ -226,6 +216,14 @@ class CollectorServer(ThreadingHTTPServer):
             raise
 
     def process_request_thread(self, request, client_address) -> None:
+        # The hard deadline starts as soon as the connection is accepted, so it
+        # covers the TLS handshake, the headers and the body alike. It shuts
+        # down the connection through a duplicate of the accepted socket,
+        # because wrapping it in TLS detaches the original object.
+        raw = request.dup()
+        deadline = threading.Timer(self.store.settings.request_deadline_seconds, self._expire, (raw, client_address))
+        deadline.daemon = True
+        deadline.start()
         try:
             if self.tls is not None:
                 request.settimeout(self.store.settings.idle_timeout_seconds)
@@ -237,7 +235,17 @@ class CollectorServer(ThreadingHTTPServer):
                     return
             super().process_request_thread(request, client_address)
         finally:
+            deadline.cancel()
+            raw.close()
             self.slots.release()
+
+    @staticmethod
+    def _expire(raw: socket.socket, client_address) -> None:
+        log.warning("closing connection from %s: request deadline passed", client_address[0])
+        try:
+            raw.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
 
 
 def tls_context(cert: Path, key: Path) -> ssl.SSLContext:

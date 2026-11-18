@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import sqlite3
+import stat
 import subprocess
 import threading
 import time
@@ -262,7 +263,7 @@ def test_corrupted_download_is_rejected_and_not_retried(server, store, cowrie, t
     shipper = make_shipper(server, cowrie, tmp_path, sensor_key)
     assert shipper.run_once() == 0
     assert store.list() == []
-    assert len(shipper.state.shipped) == 1
+    assert len(shipper.state.acked) == 1
     # Not lost: kept in the dead-letter directory with the reason.
     [meta] = (tmp_path / "dead-letter").glob("*.json")
     entry = json.loads(meta.read_text())
@@ -824,3 +825,310 @@ def test_sensor_lifecycle_is_audited(store):
         ("reuben", "sensor-key-replace"),
         ("reuben", "sensor-revoke"),
     ]
+
+
+# --- TLS: the hard deadline covers the handshake -------------------------------
+
+
+@pytest.fixture
+def tls_files(tmp_path):
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    now = datetime.now(timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
+        .sign(key, hashes.SHA256())
+    )
+    cert_path, key_path = tmp_path / "tls.crt", tmp_path / "tls.key"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+    )
+    return cert_path, key_path
+
+
+def start_tls_server(store, tls_files):
+    from bearjug.collector.server import tls_context
+
+    srv = CollectorServer(("127.0.0.1", 0), store, tls_context(*tls_files))
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
+    return srv
+
+
+def test_slow_tls_handshake_is_cut_off_at_the_deadline(store, tls_files):
+    store.settings.request_deadline_seconds = 0.5
+    store.settings.idle_timeout_seconds = 5  # each byte arrives well inside this
+    srv = start_tls_server(store, tls_files)
+    try:
+        host, port = srv.server_address
+        s = socket.create_connection((host, port), timeout=5)
+        started = time.monotonic()
+        # A TLS record header announcing a 512-byte ClientHello, then a byte at a time.
+        closed = False
+        for b in bytes([0x16, 0x03, 0x01, 0x02, 0x00]) + b"\x01" * 512:
+            try:
+                s.send(bytes([b]))
+            except OSError:
+                closed = True
+                break
+            time.sleep(0.05)
+            if time.monotonic() - started > 4:
+                break
+        if not closed:
+            s.settimeout(1)
+            try:
+                closed = s.recv(1) == b""
+            except OSError:
+                closed = True
+        elapsed = time.monotonic() - started
+        assert closed, "slow handshake was never cut off"
+        assert elapsed < 2.5, f"cut off after {elapsed:.1f}s, deadline was 0.5s"
+    finally:
+        stop_server(srv)
+
+
+def test_shipper_works_over_tls(store, tls_files, cowrie, tmp_path, sensor_key):
+    srv = start_tls_server(store, tls_files)
+    try:
+        host, port = srv.server_address
+        (cowrie / "log" / "cowrie.json").write_bytes(line(COMMAND))
+        shipper = Shipper(
+            Config(
+                sensor_id="sensor-1",
+                key=sensor_key,
+                collector_url=f"https://localhost:{port}",
+                log_dir=cowrie / "log",
+                state_path=tmp_path / "state.json",
+                dead_letter_dir=tmp_path / "dead-letter",
+                ca_file=str(tls_files[0]),
+            )
+        )
+        assert shipper.run_once() == 1
+        assert len(store.list()) == 1
+    finally:
+        stop_server(srv)
+
+
+# --- sensor-side evidence lifecycle ---------------------------------------------
+
+
+def cleaning_shipper(server, cowrie, tmp_path, key):
+    shipper = make_shipper(server, cowrie, tmp_path, key)
+    shipper.config.delete_acknowledged = True
+    shipper.config.rotated_log_settle_seconds = 0
+    return shipper
+
+
+def seed_spool(cowrie):
+    tty = cowrie / "tty" / ("ab" * 32)
+    tty.write_bytes(b"tty with typed password")
+    payload = b"#!/bin/sh\necho payload\n"
+    dl = cowrie / "downloads" / hashlib.sha256(payload).hexdigest()
+    dl.write_bytes(payload)
+    rotated = cowrie / "log" / "cowrie.json.2026-11-17"
+    rotated.write_bytes(line(LOGIN) + line(COMMAND))
+    live = cowrie / "log" / "cowrie.json"
+    live.write_bytes(line({"eventid": "cowrie.session.connect"}))
+    return tty, dl, rotated, live
+
+
+def test_acknowledged_evidence_is_removed_from_the_sensor(server, store, cowrie, tmp_path, sensor_key):
+    tty, dl, rotated, live = seed_spool(cowrie)
+    assert cleaning_shipper(server, cowrie, tmp_path, sensor_key).run_once() == 5
+    assert len(store.list()) == 5
+    assert not tty.exists() and not dl.exists() and not rotated.exists()
+    assert live.exists()  # Cowrie is still writing it
+    state = json.loads((tmp_path / "shipper-state.json").read_text())
+    assert state["acked"] == [] and list(state["offsets"]) != []  # only the live log is tracked
+
+
+def test_nothing_is_removed_without_the_option(server, cowrie, tmp_path, sensor_key):
+    files = seed_spool(cowrie)
+    make_shipper(server, cowrie, tmp_path, sensor_key).run_once()
+    assert all(f.exists() for f in files)
+
+
+def test_unreachable_collector_never_causes_deletion(store, cowrie, tmp_path, sensor_key):
+    files = seed_spool(cowrie)
+    srv = start_server(store)
+    shipper = cleaning_shipper(srv, cowrie, tmp_path, sensor_key)
+    stop_server(srv)
+    with pytest.raises(ShipError):
+        shipper.run_once()
+    assert all(f.exists() for f in files)
+
+
+def test_lost_reply_never_causes_deletion(server, store, cowrie, tmp_path, sensor_key, monkeypatch):
+    """The collector stores the evidence but the reply is lost (connection
+    reset): the shipper must treat it as not acknowledged."""
+    import urllib.request as ur
+
+    tty = cowrie / "tty" / ("cd" * 32)
+    tty.write_bytes(b"recording")
+    real = ur.urlopen
+
+    def stored_then_reset(*a, **k):
+        with real(*a, **k):
+            pass
+        raise ConnectionResetError("reply lost")
+
+    monkeypatch.setattr(ur, "urlopen", stored_then_reset)
+    shipper = cleaning_shipper(server, cowrie, tmp_path, sensor_key)
+    with pytest.raises(ShipError):
+        shipper.run_once()
+    assert len(store.list()) == 1 and tty.exists()
+    monkeypatch.setattr(ur, "urlopen", real)
+    shipper.run_once()  # resend: the collector answers "duplicate", which is an acknowledgement
+    assert len(store.list()) == 1 and not tty.exists()
+
+
+def test_partly_shipped_rotated_log_is_kept(store, cowrie, tmp_path, sensor_key, monkeypatch):
+    rotated = cowrie / "log" / "cowrie.json.2026-11-17"
+    rotated.write_bytes(line(LOGIN) + line(COMMAND))
+    srv = start_server(store)
+    try:
+        shipper = cleaning_shipper(srv, cowrie, tmp_path, sensor_key)
+        calls = {"n": 0}
+        real_send = shipper.send
+
+        def fail_second(*a, **k):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise ShipError("collector went away")
+            return real_send(*a, **k)
+
+        monkeypatch.setattr(shipper, "send", fail_second)
+        with pytest.raises(ShipError):
+            shipper.run_once()
+        assert rotated.exists() and len(store.list()) == 1
+        monkeypatch.setattr(shipper, "send", real_send)
+        shipper.run_once()
+        assert not rotated.exists() and len(store.list()) == 2
+    finally:
+        stop_server(srv)
+
+
+def test_crash_between_ack_and_delete_finishes_on_restart(server, store, cowrie, tmp_path, sensor_key, monkeypatch):
+    tty = cowrie / "tty" / ("ef" * 32)
+    tty.write_bytes(b"recording")
+
+    def crash(self, missing_ok=False):
+        raise RuntimeError("killed")
+
+    monkeypatch.setattr(Path, "unlink", crash)
+    with pytest.raises(RuntimeError):
+        cleaning_shipper(server, cowrie, tmp_path, sensor_key).run_once()
+    monkeypatch.undo()
+    assert tty.exists()
+    # A fresh process reads the saved acknowledgement and removes the file
+    # without sending it again.
+    restarted = cleaning_shipper(server, cowrie, tmp_path, sensor_key)
+    assert restarted.run_once() == 0
+    assert not tty.exists() and len(store.list()) == 1
+
+
+def test_crash_before_ack_is_saved_resends_instead_of_deleting(server, store, cowrie, tmp_path, sensor_key, monkeypatch):
+    from bearjug.shipper import State
+
+    tty = cowrie / "tty" / ("12" * 32)
+    tty.write_bytes(b"recording")
+
+    def crash(self, path):
+        raise RuntimeError("killed before the state was written")
+
+    monkeypatch.setattr(State, "save", crash)
+    with pytest.raises(RuntimeError):
+        cleaning_shipper(server, cowrie, tmp_path, sensor_key).run_once()
+    monkeypatch.undo()
+    assert tty.exists() and len(store.list()) == 1
+    cleaning_shipper(server, cowrie, tmp_path, sensor_key).run_once()
+    assert not tty.exists() and len(store.list()) == 1
+
+
+def test_refused_evidence_leaves_the_spool_only_once_preserved(server, cowrie, tmp_path, sensor_key):
+    shipper = cleaning_shipper(server, cowrie, tmp_path, sensor_key)
+    preserved = cowrie / "downloads" / hashlib.sha256(b"original").hexdigest()
+    preserved.write_bytes(b"tampered")  # refused: digest mismatch, copied to dead-letter
+    shipper.run_once()
+    assert not preserved.exists()
+    assert list((tmp_path / "dead-letter").glob("*.bin"))
+
+    shipper.dead_letter.max_bytes = 0  # dead-letter full: bytes can't be preserved
+    unpreserved = cowrie / "downloads" / hashlib.sha256(b"original2").hexdigest()
+    unpreserved.write_bytes(b"tampered2")
+    shipper.run_once()
+    assert unpreserved.exists()  # still the only copy
+    marker = f"upload:{unpreserved.name}"
+    shipper.state.unpreserved[marker] -= 31 * 86400
+    shipper.state.save(shipper.config.state_path)
+    shipper.run_once()
+    assert not unpreserved.exists()  # its retention period is over
+
+
+def test_spool_size_warning(server, cowrie, tmp_path, sensor_key, caplog):
+    shipper = make_shipper(server, cowrie, tmp_path, sensor_key)
+    shipper.config.spool_warn_bytes = 10
+    (cowrie / "tty" / ("34" * 32)).write_bytes(b"x" * 100)
+    with caplog.at_level("WARNING", logger="bearjug.shipper"):
+        shipper.run_once()
+    assert "over the 0 MiB warning level" in caplog.text
+
+
+def test_world_readable_spool_is_reported(server, cowrie, tmp_path, sensor_key, caplog):
+    tty = cowrie / "tty" / ("56" * 32)
+    tty.write_bytes(b"x")
+    tty.chmod(0o644)
+    with caplog.at_level("WARNING", logger="bearjug.shipper"):
+        make_shipper(server, cowrie, tmp_path, sensor_key).run_once()
+    assert "accessible to other users" in caplog.text
+
+
+# --- permissions are set by the code, not the umask -----------------------------
+
+
+def test_permissions_do_not_depend_on_the_umask(tmp_path, server, cowrie, sensor_key):
+    old = os.umask(0)
+    try:
+        data = tmp_path / "loose-collector"
+        init_data_dir(data)
+        s = Store(data)
+        s.add_sensor("sensor-x", actor="t")
+        body = line(COMMAND)[:-1]
+        _, eid = s.ingest(meta_for(body, sensor_id="sensor-x"), body)
+        cli.main(["--data", str(data), "add-sensor", "sensor-y", "--key-out", str(tmp_path / "y.key")])
+
+        shipper = make_shipper(server, cowrie, tmp_path, sensor_key)
+        shipper.config.dead_letter_dir = tmp_path / "dl-loose"
+        from bearjug.shipper import DeadLetter
+
+        shipper.dead_letter = DeadLetter(tmp_path / "dl-loose", max_bytes=1 << 20, retention_days=1)
+        (cowrie / "log" / "cowrie.json").write_bytes(b"bad\n")
+        shipper.run_once()
+    finally:
+        os.umask(old)
+
+    def mode(p):
+        return stat.S_IMODE(p.stat().st_mode)
+
+    assert mode(data) == 0o700
+    assert mode(data / "blobs") == 0o700
+    assert mode(s._blob_path(eid).parent) == 0o700
+    assert mode(s._blob_path(eid)) == 0o600
+    for name in ("config.json", "evidence-keys.json", "sensors.json", "evidence.db"):
+        assert mode(data / name) == 0o600, name
+    assert mode(tmp_path / "y.key") == 0o600
+    assert mode(tmp_path / "shipper-state.json") == 0o600
+    assert mode(tmp_path / "dl-loose") == 0o700
+    assert {mode(p) for p in (tmp_path / "dl-loose").iterdir()} == {0o600}

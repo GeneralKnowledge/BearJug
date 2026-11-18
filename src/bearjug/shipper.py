@@ -25,6 +25,13 @@ Security rules this module keeps (design section 2.3):
 Its own state (log offsets, files already shipped) lives outside the spool.
 Losing it only causes resends, which the collector recognises as duplicates.
 
+With ``delete_acknowledged`` the shipper also removes evidence from the sensor
+once the collector has acknowledged it, so attacker passwords, recordings and
+files don't pile up on an internet-facing machine. A file is only ever
+removed after the acknowledgement is saved in the shipper's state; a crash or
+a lost reply at any point leads to a resend, never to a premature deletion.
+See :meth:`Shipper.clean_spool`.
+
 Evidence the collector permanently refuses (bad digest, not a JSON object, too
 large) is not dropped: it goes to a local dead-letter directory with the
 reason, so it can be investigated, for example when Cowrie changes its output
@@ -60,6 +67,28 @@ MAX_LINE_BYTES = 1024 * 1024
 DEFAULT_MAX_FILE_BYTES = 32 * 1024 * 1024
 
 
+def write_private(path: Path, data: bytes) -> None:
+    """Atomically write a file readable only by its owner. The mode is set
+    explicitly, not left to the umask."""
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    os.replace(tmp, path)
+
+
+def make_private_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+
+
 class ShipError(Exception):
     """The collector can't take evidence right now; stop and retry later."""
 
@@ -84,20 +113,17 @@ class DeadLetter:
         self.dir = directory
         self.max_bytes = max_bytes
         self.retention_seconds = retention_days * 86400
-        directory.mkdir(parents=True, exist_ok=True)
-        os.chmod(directory, 0o700)
+        make_private_dir(directory)
 
     def _write(self, path: Path, data: bytes) -> None:
-        tmp = path.with_name(path.name + ".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        os.replace(tmp, path)
+        write_private(path, data)
 
     def used_bytes(self) -> int:
         return sum(p.stat().st_size for p in self.dir.glob("*.bin"))
 
-    def add(self, *, kind: EvidenceKind, source: str, reason: str, size: int, sha256: str | None, data: bytes | None) -> Path:
+    def add(self, *, kind: EvidenceKind, source: str, reason: str, size: int, sha256: str | None, data: bytes | None) -> bool:
+        """Record refused evidence. Returns whether the bytes were kept: only
+        then may the source be removed from the spool."""
         now = datetime.now(timezone.utc)
         entry_id = f"{now.strftime('%Y%m%dT%H%M%S%fZ')}-{(sha256 or 'unknown')[:16]}"
         kept, why_not = False, None
@@ -118,10 +144,9 @@ class DeadLetter:
             "bytes_kept": kept,
             "bytes_not_kept_because": why_not,
         }
-        path = self.dir / f"{entry_id}.json"
-        self._write(path, json.dumps(meta, indent=2).encode())
+        self._write(self.dir / f"{entry_id}.json", json.dumps(meta, indent=2).encode())
         log.error("dead-lettered %s from %s: %s", kind.value, source, reason)
-        return path
+        return kept
 
     def prune(self) -> int:
         cutoff = time.time() - self.retention_seconds
@@ -148,16 +173,32 @@ class Config:
     dead_letter_dir: Path = Path("dead-letter")
     dead_letter_max_bytes: int = 256 * 1024 * 1024
     dead_letter_retention_days: float = 30.0
+    delete_acknowledged: bool = False
+    """Remove evidence from the spool once the collector has acknowledged it.
+    Needs the spool mounted so the shipper can unlink files (see docs)."""
+    unpreserved_retention_days: float = 30.0
+    """How long evidence that was refused and could not be copied to the
+    dead-letter directory stays in the spool before it is removed."""
+    rotated_log_settle_seconds: float = 60.0
+    """A rotated JSON log must be this old before it is removed."""
+    spool_warn_bytes: int = 512 * 1024 * 1024
+    """Log a warning each pass while the spool holds more than this."""
     timeout: float = 30.0
 
 
 @dataclass
 class State:
     offsets: dict[str, int] = field(default_factory=dict)
-    """Byte offset shipped so far per JSON log, keyed by ``device:inode`` so
-    daily rotation (a rename) keeps its place."""
-    shipped: set[str] = field(default_factory=set)
-    """``kind:name`` of TTY logs and downloads already accepted or rejected."""
+    """Byte offset processed so far per JSON log, keyed by ``device:inode`` so
+    daily rotation (a rename) keeps its place. Every line before the offset
+    was acknowledged by the collector or dead-lettered."""
+    acked: set[str] = field(default_factory=set)
+    """``kind:name`` of TTY logs and downloads the collector acknowledged, or
+    that were dead-lettered with their bytes kept. Safe to remove."""
+    unpreserved: dict[str, float] = field(default_factory=dict)
+    """``kind:name`` (or a JSON log's ``device:inode``) refused and not copied
+    to the dead-letter directory, with when that happened. Not resent; kept in
+    the spool until ``unpreserved_retention_days`` passes."""
 
     @classmethod
     def load(cls, path: Path) -> State:
@@ -165,12 +206,18 @@ class State:
             raw = json.loads(path.read_text())
         except FileNotFoundError:
             return cls()
-        return cls(offsets={str(k): int(v) for k, v in raw["offsets"].items()}, shipped=set(raw["shipped"]))
+        return cls(
+            offsets={str(k): int(v) for k, v in raw.get("offsets", {}).items()},
+            acked=set(raw.get("acked", [])),
+            unpreserved={str(k): float(v) for k, v in raw.get("unpreserved", {}).items()},
+        )
 
     def save(self, path: Path) -> None:
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps({"offsets": self.offsets, "shipped": sorted(self.shipped)}))
-        os.replace(tmp, path)
+        data = {"offsets": self.offsets, "acked": sorted(self.acked), "unpreserved": self.unpreserved}
+        write_private(path, json.dumps(data).encode())
+
+    def done(self, marker: str) -> bool:
+        return marker in self.acked or marker in self.unpreserved
 
 
 def _open_regular(path: Path) -> tuple[int, os.stat_result]:
@@ -181,6 +228,13 @@ def _open_regular(path: Path) -> tuple[int, os.stat_result]:
         os.close(fd)
         raise OSError(f"{path} is not a regular file")
     return fd, st
+
+
+def _warn_if_exposed(path: Path, st: os.stat_result) -> None:
+    """Cowrie writes the spool, so the shipper can't set its permissions, but
+    it can refuse to stay quiet about a world-accessible one."""
+    if st.st_mode & 0o007:
+        log.warning("%s is accessible to other users (mode %o); see docs/ingestion.md", path, stat.S_IMODE(st.st_mode))
 
 
 def _mtime(st: os.stat_result) -> datetime:
@@ -257,6 +311,7 @@ class Shipper:
                 log.warning("skipping %s: %s", path.name, e)
                 continue
             key = f"{st.st_dev}:{st.st_ino}"
+            _warn_if_exposed(path, st)
             with os.fdopen(fd, "rb") as f:
                 offset = self.state.offsets.get(key, 0)
                 if offset > st.st_size:
@@ -282,8 +337,10 @@ class Shipper:
                             sha256=None,
                             data=None,
                         )
+                        self.state.unpreserved.setdefault(key, time.time())
                         offset += skipped
                         self.state.offsets[key] = offset
+                        self.state.save(self.config.state_path)
                         continue
                     if not line.endswith(b"\n"):
                         break  # incomplete line: wait for Cowrie to finish it
@@ -294,7 +351,7 @@ class Shipper:
                             self.send(EvidenceKind.COWRIE_EVENT, record, _mtime(st), digest)
                             sent += 1
                         except Rejected as e:
-                            self.dead_letter.add(
+                            kept = self.dead_letter.add(
                                 kind=EvidenceKind.COWRIE_EVENT,
                                 source=f"{path}@{offset}",
                                 reason=str(e),
@@ -302,6 +359,8 @@ class Shipper:
                                 sha256=digest,
                                 data=record,
                             )
+                            if not kept:
+                                self.state.unpreserved.setdefault(key, time.time())
                     offset += len(line)
                     self.state.offsets[key] = offset
                     self.state.save(self.config.state_path)
@@ -314,13 +373,14 @@ class Shipper:
         for path in sorted(directory.iterdir()):
             name = path.name
             marker = f"{kind.value}:{name}"
-            if not HASH_NAME.match(name) or marker in self.state.shipped:
+            if not HASH_NAME.match(name) or self.state.done(marker):
                 continue
             try:
                 fd, st = _open_regular(path)
             except OSError as e:
                 log.warning("skipping %s: %s", name, e)
                 continue
+            _warn_if_exposed(path, st)
             with os.fdopen(fd, "rb") as f:
                 if st.st_size > self.config.max_file_bytes:
                     self.dead_letter.add(
@@ -331,7 +391,7 @@ class Shipper:
                         sha256=name if kind is EvidenceKind.UPLOAD else None,
                         data=None,
                     )
-                    self.state.shipped.add(marker)
+                    self.state.unpreserved[marker] = time.time()
                     self.state.save(self.config.state_path)
                     continue
                 data = f.read(self.config.max_file_bytes + 1)
@@ -342,22 +402,119 @@ class Shipper:
                 self.send(kind, data, _mtime(st), claimed)
                 sent += 1
             except Rejected as e:
-                self.dead_letter.add(
+                kept = self.dead_letter.add(
                     kind=kind, source=str(path), reason=str(e), size=len(data), sha256=hashlib.sha256(data).hexdigest(), data=data
                 )
-            self.state.shipped.add(marker)
+                if not kept:
+                    self.state.unpreserved[marker] = time.time()
+                    self.state.save(self.config.state_path)
+                    continue
+            # Only reached after a 2xx reply, or with the bytes safe in the
+            # dead-letter directory. Saved before any deletion can happen.
+            self.state.acked.add(marker)
             self.state.save(self.config.state_path)
         return sent
 
+    # --- sensor-side cleanup ----------------------------------------------
+
+    def _unpreserved_expired(self, saved: State, marker: str) -> bool:
+        since = saved.unpreserved.get(marker)
+        return since is not None and time.time() - since > self.config.unpreserved_retention_days * 86400
+
+    def clean_spool(self) -> list[str]:
+        """Remove spool files whose evidence is safe elsewhere.
+
+        Removed: TTY logs and downloads whose acknowledgement is saved in the
+        state file; rotated JSON logs whose every line was acknowledged (or
+        dead-lettered with its bytes), once they have settled. Refused
+        evidence that could not be preserved stays until its retention period
+        ends. Nothing else is ever removed: evidence the collector hasn't
+        acknowledged, the live ``cowrie.json``, and files with other names
+        stay where they are.
+        """
+        removed: list[str] = []
+        now = time.time()
+        # Decisions are made only from what is saved on disk, never from
+        # in-memory progress that a failed save might not have recorded.
+        saved = State.load(self.config.state_path)
+        for directory, kind in ((self.config.tty_dir, EvidenceKind.TTY_LOG), (self.config.download_dir, EvidenceKind.UPLOAD)):
+            if directory is None or not directory.is_dir():
+                continue
+            present = set()
+            for path in directory.iterdir():
+                if not HASH_NAME.match(path.name):
+                    continue
+                marker = f"{kind.value}:{path.name}"
+                present.add(marker)
+                if marker in saved.acked or self._unpreserved_expired(saved, marker):
+                    path.unlink()
+                    removed.append(str(path))
+                    self.state.acked.discard(marker)
+                    self.state.unpreserved.pop(marker, None)
+            # Forget markers whose files are gone, so the state stays small.
+            prefix = f"{kind.value}:"
+            self.state.acked = {m for m in self.state.acked if not m.startswith(prefix) or m in present}
+            for m in [m for m in self.state.unpreserved if m.startswith(prefix) and m not in present]:
+                del self.state.unpreserved[m]
+
+        directory = self.config.log_dir
+        if directory is not None and directory.is_dir():
+            live = set()
+            for path in directory.iterdir():
+                if not JSON_LOG_NAME.match(path.name) or path.is_symlink() or not path.is_file():
+                    continue
+                st = path.stat()
+                key = f"{st.st_dev}:{st.st_ino}"
+                live.add(key)
+                if path.name == "cowrie.json" or now - st.st_mtime < self.config.rotated_log_settle_seconds:
+                    continue
+                if saved.offsets.get(key) != st.st_size:
+                    continue  # not every line acknowledged yet
+                if key in saved.unpreserved and not self._unpreserved_expired(saved, key):
+                    continue
+                path.unlink()
+                removed.append(str(path))
+                live.discard(key)
+                self.state.offsets.pop(key, None)
+                self.state.unpreserved.pop(key, None)
+            for key in [k for k in self.state.offsets if k not in live]:
+                del self.state.offsets[key]
+            for key in [k for k in self.state.unpreserved if ":" in k and k.split(":")[0].isdigit() and k not in live]:
+                del self.state.unpreserved[key]
+
+        self.state.save(self.config.state_path)
+        for path in removed:
+            log.info("removed acknowledged evidence %s", path)
+        return removed
+
+    def spool_bytes(self) -> int:
+        total = 0
+        for directory in (self.config.log_dir, self.config.tty_dir, self.config.download_dir):
+            if directory is not None and directory.is_dir():
+                total += sum(p.lstat().st_size for p in directory.iterdir() if p.is_file())
+        return total
+
     def run_once(self) -> int:
-        """Ship everything new. Raises :class:`ShipError` if the collector is
-        unavailable; progress so far is kept."""
+        """Ship everything new, then remove what the collector acknowledged.
+        Raises :class:`ShipError` if the collector is unavailable; progress so
+        far is kept, and acknowledged evidence is still cleaned up."""
         self.dead_letter.prune()
-        return (
-            self.ship_json_logs()
-            + self.ship_hashed_files(self.config.tty_dir, EvidenceKind.TTY_LOG)
-            + self.ship_hashed_files(self.config.download_dir, EvidenceKind.UPLOAD)
-        )
+        try:
+            return (
+                self.ship_json_logs()
+                + self.ship_hashed_files(self.config.tty_dir, EvidenceKind.TTY_LOG)
+                + self.ship_hashed_files(self.config.download_dir, EvidenceKind.UPLOAD)
+            )
+        finally:
+            if self.config.delete_acknowledged:
+                self.clean_spool()
+            size = self.spool_bytes()
+            if size > self.config.spool_warn_bytes:
+                log.warning(
+                    "spool holds %d MiB, over the %d MiB warning level; is the collector reachable?",
+                    size // 2**20,
+                    self.config.spool_warn_bytes // 2**20,
+                )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -372,6 +529,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dead-letter-dir", type=Path, default=Path("dead-letter"), help="where refused evidence is kept")
     p.add_argument("--dead-letter-max-mb", type=int, default=256)
     p.add_argument("--dead-letter-days", type=float, default=30.0)
+    p.add_argument(
+        "--delete-acknowledged",
+        action="store_true",
+        help="remove evidence from the spool once the collector has acknowledged it",
+    )
+    p.add_argument("--unpreserved-days", type=float, default=30.0, help="how long refused, unpreserved evidence stays in the spool")
+    p.add_argument("--spool-warn-mb", type=int, default=512)
     p.add_argument("--ca-file", help="CA bundle that signed the collector's certificate")
     p.add_argument("--insecure-http", action="store_true", help="allow http:// for local testing only")
     p.add_argument("--interval", type=float, default=5.0)
@@ -391,6 +555,9 @@ def main(argv: list[str] | None = None) -> int:
             dead_letter_dir=args.dead_letter_dir,
             dead_letter_max_bytes=args.dead_letter_max_mb * 1024 * 1024,
             dead_letter_retention_days=args.dead_letter_days,
+            delete_acknowledged=args.delete_acknowledged,
+            unpreserved_retention_days=args.unpreserved_days,
+            spool_warn_bytes=args.spool_warn_mb * 1024 * 1024,
             ca_file=args.ca_file,
             insecure_http=args.insecure_http,
         )
