@@ -1,0 +1,58 @@
+# {{ ansible_managed }}
+# The only component on the sensor that reaches the collector. It does not
+# depend on Cowrie: it keeps delivering the backlog while Cowrie is stopped.
+[Unit]
+Description=BearJug evidence shipper
+After=network-online.target bearjug-firewall.service
+Wants=network-online.target
+RequiresMountsFor={{ bearjug_evidence_mount }}
+
+[Service]
+Type=simple
+User=bearjug-shipper
+Group=bearjug-shipper
+SupplementaryGroups=bearjug-spool
+ExecStart={{ bearjug_prefix }}/venv/bin/bearjug-shipper \
+  --sensor-id {{ bearjug_sensor_id }} \
+  --key-file /etc/bearjug/shipper/sensor.key \
+  --collector https://{{ bearjug_collector_name }}:{{ bearjug_collector_port }} \
+  --ca-file /etc/bearjug/shipper/collector-ca.pem \
+  --log-dir {{ bearjug_evidence_mount }}/cowrie/log \
+  --tty-dir {{ bearjug_evidence_mount }}/cowrie/tty \
+  --download-dir {{ bearjug_evidence_mount }}/cowrie/downloads \
+  --state {{ bearjug_evidence_mount }}/shipper/shipper-state.json \
+  --dead-letter-dir {{ bearjug_evidence_mount }}/shipper/dead-letter \
+  --delete-acknowledged
+Restart=always
+RestartSec=5
+
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ReadWritePaths={{ bearjug_evidence_mount }}/shipper {{ bearjug_evidence_mount }}/cowrie/log {{ bearjug_evidence_mount }}/cowrie/tty {{ bearjug_evidence_mount }}/cowrie/downloads
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# Second network layer, alongside the firewall: this process can talk to the
+# collector and nothing else.
+IPAddressDeny=any
+IPAddressAllow={{ bearjug_collector_address }}
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,7 @@
 """Disk guard: warn at 70%, stop Cowrie at 80%, resume below 60% once shipping is healthy."""
 
 import json
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -276,3 +277,162 @@ def test_guard_keeps_running_with_a_malformed_health_report(setup):
     volume.percent = 10
     assert guard.check() == "held"
     assert "start" not in commands.calls
+
+
+# --- deployment: the start gate and the running check -------------------------
+# On the sensor, systemd can start Cowrie too (at boot, or restarting it after a
+# crash). The gate keeps those starts inside the guard's rules, and the running
+# check stops a Cowrie that is up when the guard says it must be down.
+
+from bearjug.diskguard import main, may_start, read_state  # noqa: E402
+
+
+class Probe:
+    def __init__(self, answer):
+        self.answer = answer
+
+    def __call__(self, argv):
+        return self.answer
+
+
+@pytest.fixture
+def gate_config(tmp_path):
+    return GuardConfig(
+        evidence_dir=tmp_path,
+        shipper_health=tmp_path / "shipper-state.health.json",
+        state_path=tmp_path / "diskguard-state.json",
+        stop_command=["stop"],
+        start_command=["start"],
+        allow_shared_filesystem=True,
+    )
+
+
+@pytest.mark.parametrize("percent, allowed", [(0, True), (79.9, True), (80, False), (95, False)])
+def test_gate_with_no_guard_stop_allows_only_below_the_stop_threshold(gate_config, percent, allowed):
+    assert may_start(gate_config, usage=Volume(percent))[0] is allowed
+
+
+@pytest.mark.parametrize("percent", [60, 70, 79.9])
+def test_gate_keeps_a_guard_stopped_cowrie_stopped_between_60_and_80(gate_config, percent):
+    gate_config.state_path.write_text(json.dumps({"cowrie_stopped": True}))
+    write_health(gate_config.shipper_health)
+    assert may_start(gate_config, usage=Volume(percent))[0] is False
+
+
+def test_gate_after_a_guard_stop_needs_healthy_shipping(gate_config):
+    gate_config.state_path.write_text(json.dumps({"cowrie_stopped": True}))
+    assert may_start(gate_config, usage=Volume(10))[0] is False  # shipper never reported
+    write_health(gate_config.shipper_health, ok=False, error="collector unreachable")
+    assert may_start(gate_config, usage=Volume(10))[0] is False
+    write_health(gate_config.shipper_health)
+    assert may_start(gate_config, usage=Volume(10))[0] is True
+
+
+@pytest.mark.parametrize("content", ["", "{", "[]", '{"cowrie_stopped": "no"}', '{"cowrie_stopped": false, "uncertain": 1}'])
+def test_gate_treats_an_untrustworthy_state_as_stopped(gate_config, content):
+    gate_config.state_path.write_text(content)
+    write_health(gate_config.shipper_health)
+    assert may_start(gate_config, usage=Volume(70))[0] is False
+    assert may_start(gate_config, usage=Volume(50))[0] is True
+    assert gate_config.state_path.read_text() == content  # the gate changes nothing
+
+
+def test_gate_refuses_evidence_on_the_root_filesystem(tmp_path):
+    config = GuardConfig(
+        evidence_dir=tmp_path, shipper_health=tmp_path / "h", state_path=tmp_path / "s", stop_command=[], start_command=[]
+    )
+    if os.stat(tmp_path).st_dev != os.stat("/").st_dev:
+        pytest.skip("tmp is its own filesystem here")
+    assert may_start(config, usage=Volume(0))[0] is False
+
+
+def test_gate_cli_exit_codes(tmp_path):
+    args = ["--gate", "--evidence-dir", str(tmp_path), "--shipper-health", str(tmp_path / "h"),
+            "--state", str(tmp_path / "s"), "--allow-shared-filesystem", "--stop-percent", "101", "--resume-percent", "100"]
+    assert main(args) == 0  # nothing stopped, below a 101% stop threshold
+    (tmp_path / "s").write_text(json.dumps({"cowrie_stopped": True}))
+    assert main(args) == 1  # stopped by the guard, shipper never reported
+    assert main([*args[:-4], "--evidence-dir", str(tmp_path / "missing")]) == 1  # can't decide: no
+
+
+def test_gate_and_guard_agree_after_the_guard_stops_cowrie(setup, gate_config):
+    make, volume, commands, config = setup
+    guard = make()
+    volume.percent = 85
+    guard.check()
+    write_health(config.shipper_health)
+    for percent in (85, 70, 60):
+        assert may_start(config, usage=Volume(percent))[0] is False
+    assert may_start(config, usage=Volume(59))[0] is True
+
+
+def test_corrupt_state_is_saved_as_unknown_for_the_gate(setup):
+    make, volume, commands, config = setup
+    config.state_path.write_text("garbage")
+    make()
+    assert read_state(config.state_path) == (True, True, None)
+    write_health(config.shipper_health)
+    assert may_start(config, usage=Volume(70))[0] is False
+    guard = make()  # a restarted guard keeps the uncertainty
+    assert guard.uncertain and guard.stopped
+
+
+def test_guard_stops_cowrie_again_if_it_runs_above_the_stop_threshold(tmp_path):
+    commands = Commands()
+    config = GuardConfig(
+        evidence_dir=tmp_path, shipper_health=tmp_path / "h", state_path=tmp_path / "s",
+        stop_command=["stop"], start_command=["start"], running_command=["is-active"], allow_shared_filesystem=True,
+    )
+    probe = Probe(False)
+    guard = DiskGuard(config, usage=Volume(85), runner=commands, probe=probe)
+    guard.check()
+    assert commands.calls == ["stop"]
+    guard.check()
+    assert commands.calls == ["stop"]  # stopped and not running: nothing to do
+    probe.answer = True  # started behind the guard's back
+    guard.check()
+    assert commands.calls == ["stop", "stop"]
+    probe.answer = None  # can't tell: stopping again is the safe answer
+    guard.check()
+    assert commands.calls == ["stop", "stop", "stop"]
+
+
+@pytest.mark.parametrize("percent, healthy", [(70, True), (50, False)])
+def test_guard_stops_a_cowrie_started_while_it_must_stay_stopped(tmp_path, percent, healthy):
+    commands = Commands()
+    config = GuardConfig(
+        evidence_dir=tmp_path, shipper_health=tmp_path / "h", state_path=tmp_path / "s",
+        stop_command=["stop"], start_command=["start"], running_command=["is-active"], allow_shared_filesystem=True,
+    )
+    config.state_path.write_text(json.dumps({"cowrie_stopped": True}))
+    if healthy:
+        write_health(config.shipper_health)
+    guard = DiskGuard(config, usage=Volume(percent), runner=commands, probe=Probe(True))
+    assert guard.check() == "held"
+    assert commands.calls == ["stop"]
+
+
+def test_without_a_running_command_behaviour_is_unchanged(setup):
+    make, volume, commands, config = setup
+    guard = make()
+    volume.percent = 85
+    guard.check()
+    guard.check()
+    assert commands.calls == ["stop", "alert"]
+
+
+def test_guard_stays_stopped_if_a_start_does_not_bring_cowrie_up(tmp_path):
+    commands = Commands()
+    config = GuardConfig(
+        evidence_dir=tmp_path, shipper_health=tmp_path / "h", state_path=tmp_path / "s",
+        stop_command=["stop"], start_command=["start"], running_command=["is-active"], allow_shared_filesystem=True,
+    )
+    config.state_path.write_text(json.dumps({"cowrie_stopped": True}))
+    write_health(config.shipper_health)
+    probe = Probe(False)
+    guard = DiskGuard(config, usage=Volume(50), runner=commands, probe=probe)
+    assert guard.check() == "held"
+    assert guard.stopped and read_state(config.state_path)[0] is True
+    probe.answer = True
+    assert guard.check() == "resumed"
+    assert read_state(config.state_path)[0] is False

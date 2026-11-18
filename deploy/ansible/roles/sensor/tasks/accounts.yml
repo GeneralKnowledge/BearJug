@@ -1,0 +1,52 @@
+# Separate, unprivileged accounts with no shell and no home directory:
+#   bearjug-cowrie   runs Cowrie inside the container (no capabilities)
+#   bearjug-shipper  reads the spool and talks to the collector
+#   bearjug-guard    watches the evidence volume, may start/stop Cowrie only
+# bearjug-spool is the group Cowrie writes its output with and the shipper
+# reads it through.
+- name: Groups
+  ansible.builtin.group:
+    name: "{{ item }}"
+    system: true
+  loop: [bearjug-cowrie, bearjug-shipper, bearjug-guard, bearjug-spool]
+
+- name: Service accounts
+  ansible.builtin.user:
+    name: "{{ item.name }}"
+    group: "{{ item.name }}"
+    groups: "{{ item.groups }}"
+    append: false
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+    home: /nonexistent
+    password: "!"
+  loop:
+    - {name: bearjug-cowrie, groups: []}
+    - {name: bearjug-shipper, groups: [bearjug-spool]}
+    - {name: bearjug-guard, groups: []}
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Account ids
+  ansible.builtin.getent:
+    database: passwd
+    key: bearjug-cowrie
+
+- name: Group ids
+  ansible.builtin.getent:
+    database: group
+    key: bearjug-spool
+
+- name: Remember the ids the container runs as
+  ansible.builtin.set_fact:
+    bearjug_cowrie_uid: "{{ ansible_facts.getent_passwd['bearjug-cowrie'][1] }}"
+    bearjug_spool_gid: "{{ ansible_facts.getent_group['bearjug-spool'][1] }}"
+
+- name: Configuration directory
+  ansible.builtin.file:
+    path: /etc/bearjug
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"

@@ -1,0 +1,6 @@
+# Deploy (or re-apply) the BearJug collector and register every sensor.
+- name: BearJug collector
+  hosts: collectors
+  become: true
+  roles:
+    - collector

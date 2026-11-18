@@ -1,0 +1,67 @@
+name: sensor-deploy
+
+# Deploys a complete sensor with deploy/ansible onto a fresh Ubuntu 24.04
+# runner, then runs the security boundary and fail-safe tests against it
+# (deploy/tests). A collector runs next to it in a container on its own
+# network, and a network namespace plays the external attacker.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      BJ_SENSOR_ID: ci-sensor
+      BJ_USER: deploy
+      ANSIBLE_FORCE_COLOR: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ansible-core python3-venv
+          python3 -m venv /tmp/testenv
+          /tmp/testenv/bin/pip install -q -e . pytest paramiko
+
+      - name: A synthetic credential for this run
+        run: echo "BJ_PASSWORD=ci-$(openssl rand -hex 8)" >> "$GITHUB_ENV"
+
+      - name: Collector and external machine
+        run: sudo deploy/ci/prepare.sh "$BJ_SENSOR_ID"
+
+      - name: Deploy the sensor
+        working-directory: deploy/ansible
+        run: sudo --preserve-env=BJ_PASSWORD,ANSIBLE_FORCE_COLOR ansible-playbook -i ../ci/inventory.yml sensor.yml
+
+      - name: Re-apply (idempotence)
+        working-directory: deploy/ansible
+        run: |
+          sudo --preserve-env=BJ_PASSWORD ansible-playbook -i ../ci/inventory.yml sensor.yml | tee /tmp/second-run.txt
+          grep -E "ci-sensor\s+: ok=[0-9]+\s+changed=0 " /tmp/second-run.txt
+
+      - name: Boundary tests
+        run: sudo --preserve-env=BJ_PASSWORD,BJ_SENSOR_ID,BJ_USER /tmp/testenv/bin/pytest -v -p no:cacheprovider deploy/tests/test_1_boundary.py
+
+      - name: Fail-safe tests
+        run: sudo --preserve-env=BJ_PASSWORD,BJ_SENSOR_ID,BJ_USER /tmp/testenv/bin/pytest -v -p no:cacheprovider deploy/tests/test_2_failsafe.py
+
+      - name: Diagnostics
+        if: always()
+        run: |
+          set +e
+          sudo systemctl --no-pager status 'bearjug-*' docker.service
+          sudo journalctl --no-pager -u 'bearjug-*' -t bearjug-alert --since "-60min" | tail -400
+          sudo nft list table inet bearjug
+          sudo docker ps -a
+          sudo docker logs bj-collector 2>&1 | tail -100
+          sudo ls -laR /srv/bearjug/evidence | head -100
+          df -h /srv/bearjug/evidence
+          exit 0

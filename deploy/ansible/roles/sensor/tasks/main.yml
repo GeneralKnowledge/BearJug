@@ -1,0 +1,13 @@
+# BearJug sensor. Order matters:
+#   validate -> admin SSH off port 22 -> accounts -> encrypted evidence volume
+#   -> firewall (before Docker) -> Docker and the Cowrie image -> services.
+- ansible.builtin.import_tasks: validate.yml
+- ansible.builtin.import_tasks: admin_ssh.yml
+- ansible.builtin.import_tasks: accounts.yml
+- ansible.builtin.import_tasks: evidence_volume.yml
+- ansible.builtin.import_tasks: firewall.yml
+- ansible.builtin.import_tasks: docker.yml
+- ansible.builtin.import_tasks: cowrie.yml
+- ansible.builtin.import_tasks: shipper.yml
+- ansible.builtin.import_tasks: diskguard.yml
+- ansible.builtin.import_tasks: services.yml

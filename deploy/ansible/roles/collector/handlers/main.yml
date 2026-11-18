@@ -1,0 +1,13 @@
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Reload collector firewall
+  ansible.builtin.systemd_service:
+    name: bearjug-collector-firewall.service
+    state: restarted
+
+- name: Restart collector
+  ansible.builtin.systemd_service:
+    name: bearjug-collector.service
+    state: restarted

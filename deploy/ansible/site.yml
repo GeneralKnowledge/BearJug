@@ -1,0 +1,2 @@
+- import_playbook: collector.yml
+- import_playbook: sensor.yml

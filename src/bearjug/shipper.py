@@ -561,7 +561,10 @@ class Shipper:
             "error": error,
             "last_ok_at": now if error is None else previous.get("last_ok_at"),
         }
-        write_private(self.health_path, json.dumps(health).encode())
+        # 0640, not 0600: the disk guard runs as its own user and reads this
+        # through the group of the shipper's state directory. It holds no
+        # evidence, only whether the last pass reached the collector.
+        write_private(self.health_path, json.dumps(health).encode(), mode=0o640)
 
     def run_once(self) -> int:
         """Ship everything new, then remove what the collector acknowledged.

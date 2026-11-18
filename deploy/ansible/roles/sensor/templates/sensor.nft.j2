@@ -1,0 +1,93 @@
+#!/usr/sbin/nft -f
+# {{ ansible_managed }}
+#
+# BearJug sensor firewall. Loaded by bearjug-firewall.service before Docker
+# starts, and checked every minute by bearjug-firewall-check.timer (Cowrie is
+# stopped if this table is missing).
+#
+# It lives in its own table, so it never touches Docker's rules, and a drop
+# here is final whatever Docker's own chains accept.
+#
+#   * Inbound: the honeypot port (forwarded by Docker to the Cowrie
+#     container) and administrative SSH from {{ bearjug_admin_cidrs | join(', ') }} only.
+#   * Cowrie's network: replies to inbound connections only. Every new
+#     connection the container starts (TCP, UDP, DNS, ICMP, to anywhere,
+#     including this host and the collector) is dropped.
+#   * The collector: only the shipper's user may connect to it, and only on
+#     the ingestion port. The collector can never open a connection to this
+#     sensor, on any port, including the honeypot port.
+
+define COLLECTOR = {{ bearjug_collector_address }}
+define COLLECTOR_PORT = {{ bearjug_collector_port }}
+define ADMIN_PORT = {{ bearjug_admin_ssh_port }}
+define HONEYPOT_PORT = {{ bearjug_honeypot_port }}
+define COWRIE_BRIDGE = "{{ bearjug_cowrie_bridge }}"
+
+table inet bearjug
+delete table inet bearjug
+
+table inet bearjug {
+{% set admin_v4 = bearjug_admin_cidrs | select('search', '^[0-9.]+(/[0-9]+)?$') | list %}
+{% set admin_v6 = bearjug_admin_cidrs | reject('search', '^[0-9.]+(/[0-9]+)?$') | list %}
+	set admin_v4 {
+		type ipv4_addr
+		flags interval
+{% if admin_v4 %}
+		elements = { {{ admin_v4 | join(', ') }} }
+{% endif %}
+	}
+
+	set admin_v6 {
+		type ipv6_addr
+		flags interval
+{% if admin_v6 %}
+		elements = { {{ admin_v6 | join(', ') }} }
+{% endif %}
+	}
+
+	chain input {
+		type filter hook input priority filter - 10; policy drop;
+
+		ct state invalid drop
+		ct state established,related accept
+		iif "lo" accept
+
+		iifname $COWRIE_BRIDGE counter drop comment "bearjug: cowrie container never reaches the host"
+		ip saddr $COLLECTOR counter drop comment "bearjug: collector never initiates into the sensor"
+
+		tcp dport $ADMIN_PORT ip saddr @admin_v4 accept
+		tcp dport $ADMIN_PORT ip6 saddr @admin_v6 accept
+
+		icmp type { echo-request, destination-unreachable, time-exceeded, parameter-problem } limit rate 10/second accept
+		icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, echo-request, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept
+		udp sport 67 udp dport 68 accept comment "DHCPv4 client"
+		udp sport 547 udp dport 546 accept comment "DHCPv6 client"
+
+		counter drop
+	}
+
+	chain forward {
+		type filter hook forward priority filter - 10; policy accept;
+
+		# Traffic leaving the Cowrie container: replies only.
+		iifname $COWRIE_BRIDGE ct state established,related accept
+		iifname $COWRIE_BRIDGE limit rate 6/minute log prefix "bearjug cowrie egress denied: " level warn
+		iifname $COWRIE_BRIDGE counter drop comment "bearjug: cowrie egress denied"
+
+		# Traffic entering the Cowrie container: new connections only to the
+		# honeypot port as forwarded by Docker, never from the collector.
+		oifname $COWRIE_BRIDGE ip saddr $COLLECTOR counter drop comment "bearjug: collector never initiates into the sensor"
+		oifname $COWRIE_BRIDGE ct state established,related accept
+		oifname $COWRIE_BRIDGE ct state new ct status dnat ct original proto-dst $HONEYPOT_PORT tcp dport 2222 accept
+		oifname $COWRIE_BRIDGE counter drop comment "bearjug: only the honeypot port reaches cowrie"
+	}
+
+	chain output {
+		type filter hook output priority filter - 10; policy accept;
+
+		ct state established,related accept
+		ip daddr $COLLECTOR tcp dport $COLLECTOR_PORT meta skuid "bearjug-shipper" accept
+		ip daddr $COLLECTOR counter drop comment "bearjug: only the shipper reaches the collector"
+		meta skuid { "bearjug-shipper", "bearjug-guard", "bearjug-cowrie" } counter drop comment "bearjug: service accounts make no other connections"
+	}
+}

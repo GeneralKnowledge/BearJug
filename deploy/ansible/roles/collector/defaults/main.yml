@@ -1,0 +1,14 @@
+# --- required: set in the inventory ---------------------------------------------
+# bearjug_admin_cidrs: ["203.0.113.7/32"]
+# The sensors come from the inventory group "sensors" (their bearjug_sensor_id
+# and ansible_host, or bearjug_sensor_address if they reach the collector from
+# another address, e.g. over a private network).
+
+bearjug_collector_port: 8443
+bearjug_collector_name: collector.bearjug.internal
+bearjug_collector_data: /var/lib/bearjug-collector
+bearjug_secrets_dir: "{{ inventory_dir }}/secrets"
+bearjug_admin_ssh_port: 22022
+bearjug_admin_permit_root_login: prohibit-password
+bearjug_manage_admin_ssh: true
+bearjug_collector_tls_days: 825

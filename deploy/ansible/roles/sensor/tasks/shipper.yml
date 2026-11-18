@@ -1,0 +1,36 @@
+- name: Collector name resolves without DNS
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: "\\s{{ bearjug_collector_name | regex_escape }}$"
+    line: "{{ bearjug_collector_address }} {{ bearjug_collector_name }}"
+
+- name: Shipper configuration directory
+  ansible.builtin.file:
+    path: /etc/bearjug/shipper
+    state: directory
+    owner: root
+    group: bearjug-shipper
+    mode: "0750"
+
+- name: Sensor key and collector certificate
+  ansible.builtin.copy:
+    src: "{{ bearjug_secrets_dir }}/{{ item.src }}"
+    dest: "/etc/bearjug/shipper/{{ item.dest }}"
+    owner: bearjug-shipper
+    group: bearjug-shipper
+    mode: "{{ item.mode }}"
+  loop:
+    - {src: "sensors/{{ bearjug_sensor_id }}.key", dest: sensor.key, mode: "0400"}
+    - {src: collector-ca.pem, dest: collector-ca.pem, mode: "0444"}
+  loop_control:
+    label: "{{ item.dest }}"
+  notify: Restart shipper
+
+- name: Shipper unit
+  ansible.builtin.template:
+    src: systemd/bearjug-shipper.service.j2
+    dest: /etc/systemd/system/bearjug-shipper.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: [Reload systemd, Restart shipper]

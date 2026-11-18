@@ -1,0 +1,6 @@
+# {{ ansible_managed }}
+# Exact synthetic credentials only (user:x:password). These accounts exist only
+# inside the honeypot; they are never real users on any machine.
+{% for c in bearjug_sensor_credentials %}
+{{ c.username }}:x:{{ c.password }}
+{% endfor %}

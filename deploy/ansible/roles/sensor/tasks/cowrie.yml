@@ -1,0 +1,49 @@
+- name: Cowrie image build context
+  ansible.builtin.copy:
+    src: "{{ bearjug_source_dir }}/deploy/cowrie/"
+    dest: "{{ bearjug_prefix }}/cowrie-image/"
+    owner: root
+    group: root
+    mode: u=rwX,go=rX
+  register: bearjug_cowrie_context
+
+- name: Is the Cowrie image present?
+  ansible.builtin.command: docker image inspect --format '{{ "{{" }}.Id{{ "}}" }}' {{ bearjug_cowrie_image }}
+  register: bearjug_cowrie_image_id
+  changed_when: false
+  failed_when: false
+
+# Pinned Cowrie commit, base images by digest, wheels only; the overlay
+# refuses to apply if upstream changed (deploy/cowrie/Dockerfile).
+- name: Build the Cowrie image
+  ansible.builtin.command: docker build --pull=false -t {{ bearjug_cowrie_image }} {{ bearjug_prefix }}/cowrie-image
+  when: bearjug_cowrie_context.changed or bearjug_cowrie_image_id.rc != 0
+  changed_when: true
+  notify: Restart cowrie
+
+- name: Cowrie configuration directory
+  ansible.builtin.file:
+    path: /etc/bearjug/cowrie
+    state: directory
+    owner: root
+    group: bearjug-spool
+    mode: "0750"
+
+- name: Cowrie configuration
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/bearjug/cowrie/{{ item }}"
+    owner: root
+    group: bearjug-spool
+    mode: "0640"
+  loop: [cowrie.cfg, userdb.txt]
+  notify: Restart cowrie
+
+- name: Cowrie unit
+  ansible.builtin.template:
+    src: systemd/bearjug-cowrie.service.j2
+    dest: /etc/systemd/system/bearjug-cowrie.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: [Reload systemd, Restart cowrie]

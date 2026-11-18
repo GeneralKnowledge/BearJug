@@ -1,0 +1,52 @@
+# Administrative SSH moves off the honeypot port and only accepts keys, from
+# the admin addresses (the firewall enforces those). Ubuntu 24.04 starts sshd
+# from ssh.socket, whose port comes from sshd_config.
+# `sshd -t` needs its privilege separation directory, which only exists
+# while sshd runs (it is the unit's RuntimeDirectory). Socket activation, or
+# an image where sshd hasn't started yet, leaves it missing.
+- name: sshd privilege separation directory, for validation
+  ansible.builtin.file:
+    path: /run/sshd
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: bearjug_manage_admin_ssh
+  changed_when: false
+
+- name: Administrative SSH settings
+  ansible.builtin.template:
+    src: sshd-bearjug.conf.j2
+    dest: /etc/ssh/sshd_config.d/10-bearjug.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/sbin/sshd -t -f %s
+  when: bearjug_manage_admin_ssh
+  register: bearjug_sshd_conf
+
+- name: Move administrative SSH to port {{ bearjug_admin_ssh_port }}
+  ansible.builtin.shell: |
+    set -e
+    systemctl daemon-reload
+    if systemctl is-enabled --quiet ssh.socket 2>/dev/null; then
+      systemctl restart ssh.socket
+    fi
+    systemctl restart ssh.service || true
+  when: bearjug_manage_admin_ssh and bearjug_sshd_conf.changed
+  changed_when: true
+
+- name: Stop here until Ansible connects on the administrative port
+  when:
+    - bearjug_manage_admin_ssh
+    - ansible_connection not in ["local"]
+    - (ansible_port | default(22) | int) != (bearjug_admin_ssh_port | int)
+  block:
+    - name: Explain the next step
+      ansible.builtin.debug:
+        msg: >-
+          Administrative SSH now listens on port {{ bearjug_admin_ssh_port }} (from {{ bearjug_admin_cidrs | join(', ') }}).
+          Set ansible_port: {{ bearjug_admin_ssh_port }} for {{ inventory_hostname }} and run sensor.yml again.
+          Port {{ bearjug_honeypot_port }} is about to become the honeypot.
+    - name: End this host
+      ansible.builtin.meta: end_host

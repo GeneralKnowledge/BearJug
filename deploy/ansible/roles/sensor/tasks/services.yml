@@ -1,0 +1,25 @@
+- name: Apply unit changes
+  ansible.builtin.meta: flush_handlers
+
+# The disk guard and shipper first; Cowrie last, through its start gate.
+- name: Services enabled and running
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop:
+    - bearjug-diskguard.service
+    - bearjug-shipper.service
+    - bearjug-cowrie.service
+
+- name: Cowrie is up (or the disk guard says why not)
+  ansible.builtin.command: systemctl is-active bearjug-cowrie.service
+  register: bearjug_cowrie_active
+  changed_when: false
+  failed_when: false
+
+- name: Report Cowrie's state
+  ansible.builtin.debug:
+    msg: >-
+      bearjug-cowrie.service is {{ bearjug_cowrie_active.stdout }}.
+      {{ '' if bearjug_cowrie_active.stdout == 'active' else 'See: journalctl -u bearjug-cowrie -u bearjug-diskguard' }}

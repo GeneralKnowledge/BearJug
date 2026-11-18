@@ -4,3 +4,7 @@ __pycache__/
 .venv/
 build/
 dist/
+
+# Ansible: real inventories and generated secrets stay out of git
+deploy/ansible/inventory.yml
+deploy/ansible/secrets/

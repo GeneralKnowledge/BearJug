@@ -1,0 +1,14 @@
+# {{ ansible_managed }}
+[Unit]
+Description=BearJug collector: delete evidence past its retention period
+
+[Service]
+Type=oneshot
+User=bearjug-collector
+Group=bearjug-collector
+ExecStart={{ bearjug_prefix }}/venv/bin/bearjug-collector --data {{ bearjug_collector_data }}/store --actor purge-timer purge
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths={{ bearjug_collector_data }}
+PrivateNetwork=yes

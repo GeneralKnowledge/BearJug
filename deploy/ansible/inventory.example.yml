@@ -1,0 +1,36 @@
+# Copy to inventory.yml (git-ignored) and fill in. See docs/deployment.md.
+all:
+  vars:
+    # Where Ansible keeps generated secrets on the machine you run it from
+    # (sensor keys, the collector's certificate). Keep it out of git.
+    bearjug_secrets_dir: "{{ inventory_dir }}/secrets"
+    # Addresses that may reach administrative SSH on the sensors and collector.
+    bearjug_admin_cidrs: ["203.0.113.7/32"]
+    bearjug_admin_ssh_port: 22022
+
+  children:
+    collectors:
+      hosts:
+        collector-1:
+          ansible_host: 198.51.100.20
+          ansible_user: ubuntu
+
+    sensors:
+      vars:
+        # The collector as the sensors reach it. Use its private address if
+        # the two machines share a private network.
+        bearjug_collector_address: 198.51.100.20
+      hosts:
+        sensor-1:
+          ansible_host: 192.0.2.10
+          ansible_user: ubuntu
+          # First run: 22. After the first run moves administrative SSH, use
+          # bearjug_admin_ssh_port here.
+          ansible_port: 22
+          bearjug_sensor_id: sensor-1
+          # Synthetic credentials the honeypot accepts (exact matches only).
+          # They exist only inside Cowrie: never real accounts, never reused.
+          # Keep the real values in a vault file, not in plain text here.
+          bearjug_sensor_credentials:
+            - username: deploy
+              password: "{{ vault_sensor_1_deploy_password }}"

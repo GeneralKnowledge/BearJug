@@ -1,0 +1,18 @@
+# {{ ansible_managed }}
+[Unit]
+Description=BearJug sensor firewall (nftables table inet bearjug)
+Documentation=file:///etc/bearjug/nftables/sensor.nft
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target docker.service bearjug-cowrie.service bearjug-shipper.service
+After=local-fs.target systemd-sysusers.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/bearjug/nftables/sensor.nft
+ExecReload=/usr/sbin/nft -f /etc/bearjug/nftables/sensor.nft
+# Stopping this unit leaves the rules in place: they are only ever replaced.
+
+[Install]
+WantedBy=sysinit.target

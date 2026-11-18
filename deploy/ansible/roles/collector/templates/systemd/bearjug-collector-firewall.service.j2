@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+[Unit]
+Description=BearJug collector firewall (nftables table inet bearjug)
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target bearjug-collector.service
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/bearjug/nftables/collector.nft
+ExecReload=/usr/sbin/nft -f /etc/bearjug/nftables/collector.nft
+
+[Install]
+WantedBy=sysinit.target

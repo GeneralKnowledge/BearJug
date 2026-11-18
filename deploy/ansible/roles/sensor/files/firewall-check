@@ -1,0 +1,4 @@
+#!/bin/sh
+# Exit 0 only if the BearJug firewall is loaded with Cowrie's egress rule.
+# Used before Cowrie starts and every minute while it runs.
+/usr/sbin/nft list chain inet bearjug forward 2>/dev/null | grep -q 'bearjug: cowrie egress denied'

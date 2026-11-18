@@ -1,0 +1,28 @@
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Reload firewall
+  ansible.builtin.systemd_service:
+    name: bearjug-firewall.service
+    state: restarted
+
+- name: Restart docker
+  ansible.builtin.systemd_service:
+    name: docker.service
+    state: restarted
+
+- name: Restart cowrie
+  ansible.builtin.systemd_service:
+    name: bearjug-cowrie.service
+    state: restarted
+
+- name: Restart shipper
+  ansible.builtin.systemd_service:
+    name: bearjug-shipper.service
+    state: restarted
+
+- name: Restart disk guard
+  ansible.builtin.systemd_service:
+    name: bearjug-diskguard.service
+    state: restarted
