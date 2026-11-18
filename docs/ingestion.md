@@ -5,7 +5,7 @@ what each part is trusted to do. Design background: [design doc section 2.3](des
 and [tooling audit section 2.6](research/tooling-audit.md).
 
 ```
-Cowrie (honeypot)                    shipper (own container)                 collector (separate machine)
+Cowrie (honeypot)                    shipper (own service account)           collector (separate machine)
   writes its own output  --mount----->  reads, hashes, signs  --HTTPS POST-->  verifies, encrypts, stores
   cowrie.json, tty/, downloads/         never executes content                never connects out
 ```
@@ -128,7 +128,8 @@ On filesystems or virtual disks that ignore `fsync`, only the process-crash
 guarantee holds.
 
 Removing files means the shipper needs permission to delete entries in
-Cowrie's output directories, not just read them. The intended setup (PR 5):
+Cowrie's output directories, not just read them. The deployed setup
+([deployment.md](deployment.md)):
 Cowrie owns the directories, the shipper's user is in their group, directories
 are `2770` and files `0640`. The shipper still can't change any file's
 contents, and it never creates files there. Without `--delete-acknowledged`
@@ -169,7 +170,8 @@ whole evidence filesystem:
   doesn't flap around one threshold. The guard saves whether it stopped
   Cowrie, so a restarted guard won't start it while the volume is still too
   full.
-* **Shipper health.** Each shipper pass writes `<state>.health.json` (0600),
+* **Shipper health.** Each shipper pass writes `<state>.health.json` (0640, so
+  the disk guard's account can read it through the directory's group),
   saying whether it reached the collector. A pass with nothing to send still
   checks that the collector answers, so an idle shipper isn't mistaken for a
   healthy one.
@@ -211,7 +213,7 @@ file other users can read. Run Cowrie with `umask 027` so its files come out
 
 ### Encryption at rest on the sensor
 
-This is a deployment requirement (PR 5), not something the shipper can do:
+This is a deployment requirement ([deployment.md](deployment.md) sets it up), not something the shipper can do:
 Cowrie writes plaintext. Put Cowrie's output, the shipper state and the
 dead-letter directory on one volume that is encrypted at rest (LUKS/dm-crypt,
 or the provider's encrypted block storage). That protects against disk
@@ -445,9 +447,9 @@ bearjug-collector --data ./collector check
 
 ## Not in this PR
 
-* Network isolation, containers, the spool mount and its permissions, the
-  encrypted evidence volume, running the disk guard with real Cowrie stop and
-  start commands, and the reverse proxy configuration itself: PR 5,
-  which also turns the shipper's boundary into tests against real containers.
+* Network isolation, the Cowrie container, the spool permissions, the
+  encrypted evidence volume and the disk guard's real stop and start commands
+  are deployed by `deploy/ansible`: see [deployment.md](deployment.md).
+* The reverse proxy configuration itself.
 * Normalising Cowrie events into canonical events, and keyed password hashes.
 * Evidence hash chaining.

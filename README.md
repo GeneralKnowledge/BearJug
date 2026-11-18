@@ -10,6 +10,7 @@ recorded. They never reach a real machine.
 - [Implementation roadmap](docs/roadmap.md)
 - [Canonical event schema](docs/schema.md)
 - [Evidence ingestion and storage](docs/ingestion.md)
+- [Deploying an isolated sensor](docs/deployment.md)
 
 ## Development
 

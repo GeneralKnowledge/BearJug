@@ -64,3 +64,4 @@ jobs:
           sudo docker logs bj-collector 2>&1 | tail -100
           sudo ls -laR /srv/bearjug/evidence | head -100
           df -h /srv/bearjug/evidence
+          exit 0

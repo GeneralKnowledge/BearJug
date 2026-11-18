@@ -1,6 +1,19 @@
 # Administrative SSH moves off the honeypot port and only accepts keys, from
 # the admin addresses (the firewall enforces those). Ubuntu 24.04 starts sshd
 # from ssh.socket, whose port comes from sshd_config.
+# `sshd -t` needs its privilege separation directory, which only exists
+# while sshd runs (it is the unit's RuntimeDirectory). Socket activation, or
+# an image where sshd hasn't started yet, leaves it missing.
+- name: sshd privilege separation directory, for validation
+  ansible.builtin.file:
+    path: /run/sshd
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: bearjug_manage_admin_ssh
+  changed_when: false
+
 - name: Administrative SSH settings
   ansible.builtin.template:
     src: sshd-bearjug.conf.j2

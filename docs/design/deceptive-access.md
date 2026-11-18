@@ -129,7 +129,11 @@ Shipping is a **distinct component**, not a loosely defined sidecar:
 PR 5 introduces a security test suite that runs in CI against a real sensor
 container. Each guarantee is a test that must pass.
 
-**Status: specified, not yet implemented.** Until these tests exist and pass in
+**Status: partly implemented** in `deploy/tests` (see
+[deployment.md](../deployment.md)), run by the `sensor-deploy` workflow against
+a freshly deployed sensor. Not yet covered: uploads and quarantine (SFTP is
+off) and the secret scanner over profiles (no profiles yet). Until a test
+exists and passes in
 CI, none of these guarantees should be treated as proven.
 
 | Guarantee | Test |

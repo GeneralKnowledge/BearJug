@@ -12,8 +12,10 @@ authentication; synthetic secrets never valid and never real-shaped; all
 outbound actions simulated and recorded), and from PR 5 onward every PR must
 pass the security boundary test suite.
 
-The security boundary test suite is **specified** in the design doc, not yet
-implemented. A specified suite is not a passing one.
+The security boundary test suite runs in CI (`sensor-deploy` workflow,
+`deploy/tests`) against a sensor deployed by `deploy/ansible`; see
+[deployment.md](deployment.md). Upload quarantine and the profile secret scan
+are still to come with the features they test.
 
 ## PR plan
 
