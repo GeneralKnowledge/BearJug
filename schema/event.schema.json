@@ -1,0 +1,1529 @@
+{
+  "$comment": "Generated from bearjug.schema; do not edit. STRUCTURAL ONLY: this JSON Schema does not encode the cross-field security rules (evidence sensitivity, production auth policy, experiment labelling, outbound destinations). Passing it does not mean a record is acceptable. Validate with bearjug.schema before storing or acting on a record. See docs/schema.md.",
+  "$defs": {
+    "AuthAttempt": {
+      "additionalProperties": false,
+      "properties": {
+        "decision": {
+          "$ref": "#/$defs/AuthDecision"
+        },
+        "event_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "auth.attempt",
+          "default": "auth.attempt",
+          "title": "Event Type",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "parser": {
+          "minLength": 1,
+          "title": "Parser",
+          "type": "string"
+        },
+        "password": {
+          "$ref": "#/$defs/PasswordRef"
+        },
+        "policy": {
+          "$ref": "#/$defs/AuthPolicy"
+        },
+        "profile_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "rule": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Rule",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sensor_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Sensor Id",
+          "type": "string"
+        },
+        "session_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Session Id",
+          "type": "string"
+        },
+        "src": {
+          "$ref": "#/$defs/Endpoint"
+        },
+        "username": {
+          "title": "Username",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "sensor_id",
+        "profile_id",
+        "session_id",
+        "parser",
+        "evidence",
+        "src",
+        "username",
+        "password",
+        "decision",
+        "rule",
+        "policy"
+      ],
+      "title": "AuthAttempt",
+      "type": "object"
+    },
+    "AuthDecision": {
+      "enum": [
+        "accept",
+        "reject"
+      ],
+      "title": "AuthDecision",
+      "type": "string"
+    },
+    "AuthPolicy": {
+      "additionalProperties": false,
+      "description": "Which credential policy was in force.\n\nAnything other than exact synthetic matching (for example \"accept after N\nattempts\") is an experiment and must say so, with its experiment id, so\nanalysis can separate it from genuine credential discovery.",
+      "properties": {
+        "experiment_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Experiment Id"
+        },
+        "kind": {
+          "$ref": "#/$defs/PolicyKind"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "AuthPolicy",
+      "type": "object"
+    },
+    "CommandInput": {
+      "additionalProperties": false,
+      "properties": {
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Args",
+          "type": "array"
+        },
+        "command": {
+          "title": "Command",
+          "type": "string"
+        },
+        "event_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "command.input",
+          "default": "command.input",
+          "title": "Event Type",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        },
+        "handler": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Handler"
+        },
+        "line": {
+          "title": "Line",
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "parser": {
+          "minLength": 1,
+          "title": "Parser",
+          "type": "string"
+        },
+        "profile_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sensor_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Sensor Id",
+          "type": "string"
+        },
+        "sequence": {
+          "minimum": 0,
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "session_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Session Id",
+          "type": "string"
+        },
+        "since_previous_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Since Previous Ms"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "sensor_id",
+        "profile_id",
+        "session_id",
+        "parser",
+        "evidence",
+        "sequence",
+        "line",
+        "command"
+      ],
+      "title": "CommandInput",
+      "type": "object"
+    },
+    "CommandResult": {
+      "additionalProperties": false,
+      "properties": {
+        "error_class": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Class"
+        },
+        "event_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "command.result",
+          "default": "command.result",
+          "title": "Event Type",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/Outcome"
+        },
+        "parser": {
+          "minLength": 1,
+          "title": "Parser",
+          "type": "string"
+        },
+        "profile_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sensor_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Sensor Id",
+          "type": "string"
+        },
+        "sequence": {
+          "minimum": 0,
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "session_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Session Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "sensor_id",
+        "profile_id",
+        "session_id",
+        "parser",
+        "evidence",
+        "sequence",
+        "outcome"
+      ],
+      "title": "CommandResult",
+      "type": "object"
+    },
+    "DiscoveryAttempt": {
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "discovery.attempt",
+          "default": "discovery.attempt",
+          "title": "Event Type",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "parser": {
+          "minLength": 1,
+          "title": "Parser",
+          "type": "string"
+        },
+        "profile_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sensor_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Sensor Id",
+          "type": "string"
+        },
+        "session_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Session Id",
+          "type": "string"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
+        "technique": {
+          "title": "Technique",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "sensor_id",
+        "profile_id",
+        "session_id",
+        "parser",
+        "evidence",
+        "technique"
+      ],
+      "title": "DiscoveryAttempt",
+      "type": "object"
+    },
+    "Endpoint": {
+      "additionalProperties": false,
+      "description": "A network endpoint as seen by the sensor.",
+      "properties": {
+        "ip": {
+          "anyOf": [
+            {
+              "format": "ipv4",
+              "type": "string"
+            },
+            {
+              "format": "ipv6",
+              "type": "string"
+            }
+          ],
+          "title": "Ip"
+        },
+        "port": {
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Port",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "ip",
+        "port"
+      ],
+      "title": "Endpoint",
+      "type": "object"
+    },
+    "EvidenceRef": {
+      "additionalProperties": false,
+      "description": "Pointer from a derived record back to the raw evidence it came from.",
+      "properties": {
+        "evidence_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "sha256"
+      ],
+      "title": "EvidenceRef",
+      "type": "object"
+    },
+    "FsAccess": {
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "fs.access",
+          "default": "fs.access",
+          "title": "Event Type",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "operation": {
+          "$ref": "#/$defs/FsOperation"
+        },
+        "parser": {
+          "minLength": 1,
+          "title": "Parser",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "profile_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sensor_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Sensor Id",
+          "type": "string"
+        },
+        "session_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Session Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "sensor_id",
+        "profile_id",
+        "session_id",
+        "parser",
+        "evidence",
+        "path",
+        "operation"
+      ],
+      "title": "FsAccess",
+      "type": "object"
+    },
+    "FsOperation": {
+      "enum": [
+        "read",
+        "list",
+        "search",
+        "write",
+        "delete"
+      ],
+      "title": "FsOperation",
+      "type": "string"
+    },
+    "OutboundSimulated": {
+      "additionalProperties": false,
+      "description": "An attempted outbound action. Recorded, answered locally, never made.",
+      "properties": {
+        "connection_made": {
+          "const": false,
+          "default": false,
+          "title": "Connection Made",
+          "type": "boolean"
+        },
+        "event_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "outbound.simulated",
+          "default": "outbound.simulated",
+          "title": "Event Type",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        },
+        "host": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Host"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "parser": {
+          "minLength": 1,
+          "title": "Parser",
+          "type": "string"
+        },
+        "port": {
+          "anyOf": [
+            {
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Port"
+        },
+        "profile_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sensor_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Sensor Id",
+          "type": "string"
+        },
+        "session_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Session Id",
+          "type": "string"
+        },
+        "simulated_response": {
+          "title": "Simulated Response",
+          "type": "string"
+        },
+        "tool": {
+          "title": "Tool",
+          "type": "string"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "sensor_id",
+        "profile_id",
+        "session_id",
+        "parser",
+        "evidence",
+        "tool",
+        "simulated_response"
+      ],
+      "title": "OutboundSimulated",
+      "type": "object"
+    },
+    "Outcome": {
+      "enum": [
+        "success",
+        "failure"
+      ],
+      "title": "Outcome",
+      "type": "string"
+    },
+    "PasswordFeatures": {
+      "additionalProperties": false,
+      "properties": {
+        "has_digit": {
+          "title": "Has Digit",
+          "type": "boolean"
+        },
+        "has_lower": {
+          "title": "Has Lower",
+          "type": "boolean"
+        },
+        "has_symbol": {
+          "title": "Has Symbol",
+          "type": "boolean"
+        },
+        "has_upper": {
+          "title": "Has Upper",
+          "type": "boolean"
+        },
+        "in_wordlist": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "In Wordlist"
+        },
+        "length": {
+          "minimum": 0,
+          "title": "Length",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "length",
+        "has_lower",
+        "has_upper",
+        "has_digit",
+        "has_symbol"
+      ],
+      "title": "PasswordFeatures",
+      "type": "object"
+    },
+    "PasswordRef": {
+      "additionalProperties": false,
+      "properties": {
+        "features": {
+          "$ref": "#/$defs/PasswordFeatures"
+        },
+        "hmac_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Hmac Sha256",
+          "type": "string"
+        },
+        "key_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Key Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key_id",
+        "hmac_sha256",
+        "features"
+      ],
+      "title": "PasswordRef",
+      "type": "object"
+    },
+    "PersistenceAttempt": {
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "persistence.attempt",
+          "default": "persistence.attempt",
+          "title": "Event Type",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        },
+        "mechanism": {
+          "title": "Mechanism",
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "parser": {
+          "minLength": 1,
+          "title": "Parser",
+          "type": "string"
+        },
+        "profile_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sensor_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Sensor Id",
+          "type": "string"
+        },
+        "session_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Session Id",
+          "type": "string"
+        },
+        "target": {
+          "title": "Target",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "sensor_id",
+        "profile_id",
+        "session_id",
+        "parser",
+        "evidence",
+        "mechanism",
+        "target"
+      ],
+      "title": "PersistenceAttempt",
+      "type": "object"
+    },
+    "PolicyKind": {
+      "enum": [
+        "production",
+        "experimental"
+      ],
+      "title": "PolicyKind",
+      "type": "string"
+    },
+    "PrivescSimulated": {
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "privesc.simulated",
+          "default": "privesc.simulated",
+          "title": "Event Type",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/Outcome"
+        },
+        "parser": {
+          "minLength": 1,
+          "title": "Parser",
+          "type": "string"
+        },
+        "profile_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sensor_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Sensor Id",
+          "type": "string"
+        },
+        "session_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Session Id",
+          "type": "string"
+        },
+        "technique": {
+          "title": "Technique",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "sensor_id",
+        "profile_id",
+        "session_id",
+        "parser",
+        "evidence",
+        "technique",
+        "outcome"
+      ],
+      "title": "PrivescSimulated",
+      "type": "object"
+    },
+    "SecretAccessed": {
+      "additionalProperties": false,
+      "properties": {
+        "decoy_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Decoy Id",
+          "type": "string"
+        },
+        "event_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "secret.accessed",
+          "default": "secret.accessed",
+          "title": "Event Type",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        },
+        "location": {
+          "title": "Location",
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "parser": {
+          "minLength": 1,
+          "title": "Parser",
+          "type": "string"
+        },
+        "profile_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sensor_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Sensor Id",
+          "type": "string"
+        },
+        "session_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Session Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "sensor_id",
+        "profile_id",
+        "session_id",
+        "parser",
+        "evidence",
+        "decoy_id",
+        "location"
+      ],
+      "title": "SecretAccessed",
+      "type": "object"
+    },
+    "SecretUsed": {
+      "additionalProperties": false,
+      "properties": {
+        "decoy_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Decoy Id",
+          "type": "string"
+        },
+        "event_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "secret.used",
+          "default": "secret.used",
+          "title": "Event Type",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "parser": {
+          "minLength": 1,
+          "title": "Parser",
+          "type": "string"
+        },
+        "profile_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sensor_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Sensor Id",
+          "type": "string"
+        },
+        "session_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Session Id",
+          "type": "string"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
+        "used_with": {
+          "title": "Used With",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "sensor_id",
+        "profile_id",
+        "session_id",
+        "parser",
+        "evidence",
+        "decoy_id",
+        "used_with"
+      ],
+      "title": "SecretUsed",
+      "type": "object"
+    },
+    "SessionEnd": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_seconds": {
+          "minimum": 0,
+          "title": "Duration Seconds",
+          "type": "number"
+        },
+        "event_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "session.end",
+          "default": "session.end",
+          "title": "Event Type",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "parser": {
+          "minLength": 1,
+          "title": "Parser",
+          "type": "string"
+        },
+        "profile_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sensor_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Sensor Id",
+          "type": "string"
+        },
+        "session_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Session Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "sensor_id",
+        "profile_id",
+        "session_id",
+        "parser",
+        "evidence",
+        "duration_seconds"
+      ],
+      "title": "SessionEnd",
+      "type": "object"
+    },
+    "SessionStart": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "title": "Account",
+          "type": "string"
+        },
+        "event_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "session.start",
+          "default": "session.start",
+          "title": "Event Type",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "parser": {
+          "minLength": 1,
+          "title": "Parser",
+          "type": "string"
+        },
+        "policy": {
+          "$ref": "#/$defs/AuthPolicy"
+        },
+        "profile_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sensor_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Sensor Id",
+          "type": "string"
+        },
+        "session_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Session Id",
+          "type": "string"
+        },
+        "source_ip_seen_before": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Ip Seen Before"
+        },
+        "src": {
+          "$ref": "#/$defs/Endpoint"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "sensor_id",
+        "profile_id",
+        "session_id",
+        "parser",
+        "evidence",
+        "src",
+        "account",
+        "policy"
+      ],
+      "title": "SessionStart",
+      "type": "object"
+    },
+    "UploadReceived": {
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "upload.received",
+          "default": "upload.received",
+          "title": "Event Type",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        },
+        "filename_as_given": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Filename As Given"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "parser": {
+          "minLength": 1,
+          "title": "Parser",
+          "type": "string"
+        },
+        "profile_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "quarantine_ref": {
+          "minLength": 1,
+          "title": "Quarantine Ref",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sensor_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Sensor Id",
+          "type": "string"
+        },
+        "session_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Session Id",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "sensor_id",
+        "profile_id",
+        "session_id",
+        "parser",
+        "evidence",
+        "quarantine_ref",
+        "size_bytes",
+        "sha256"
+      ],
+      "title": "UploadReceived",
+      "type": "object"
+    }
+  },
+  "discriminator": {
+    "mapping": {
+      "auth.attempt": "#/$defs/AuthAttempt",
+      "command.input": "#/$defs/CommandInput",
+      "command.result": "#/$defs/CommandResult",
+      "discovery.attempt": "#/$defs/DiscoveryAttempt",
+      "fs.access": "#/$defs/FsAccess",
+      "outbound.simulated": "#/$defs/OutboundSimulated",
+      "persistence.attempt": "#/$defs/PersistenceAttempt",
+      "privesc.simulated": "#/$defs/PrivescSimulated",
+      "secret.accessed": "#/$defs/SecretAccessed",
+      "secret.used": "#/$defs/SecretUsed",
+      "session.end": "#/$defs/SessionEnd",
+      "session.start": "#/$defs/SessionStart",
+      "upload.received": "#/$defs/UploadReceived"
+    },
+    "propertyName": "event_type"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/AuthAttempt"
+    },
+    {
+      "$ref": "#/$defs/SessionStart"
+    },
+    {
+      "$ref": "#/$defs/SessionEnd"
+    },
+    {
+      "$ref": "#/$defs/CommandInput"
+    },
+    {
+      "$ref": "#/$defs/CommandResult"
+    },
+    {
+      "$ref": "#/$defs/FsAccess"
+    },
+    {
+      "$ref": "#/$defs/OutboundSimulated"
+    },
+    {
+      "$ref": "#/$defs/DiscoveryAttempt"
+    },
+    {
+      "$ref": "#/$defs/PrivescSimulated"
+    },
+    {
+      "$ref": "#/$defs/PersistenceAttempt"
+    },
+    {
+      "$ref": "#/$defs/SecretAccessed"
+    },
+    {
+      "$ref": "#/$defs/SecretUsed"
+    },
+    {
+      "$ref": "#/$defs/UploadReceived"
+    }
+  ]
+}

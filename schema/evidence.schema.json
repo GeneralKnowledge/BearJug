@@ -1,0 +1,187 @@
+{
+  "$comment": "Generated from bearjug.schema; do not edit. STRUCTURAL ONLY: this JSON Schema does not encode the cross-field security rules (evidence sensitivity, production auth policy, experiment labelling, outbound destinations). Passing it does not mean a record is acceptable. Validate with bearjug.schema before storing or acting on a record. See docs/schema.md.",
+  "$defs": {
+    "Encryption": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "$ref": "#/$defs/EncryptionAlgorithm"
+        },
+        "key_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "title": "Key Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "algorithm",
+        "key_id"
+      ],
+      "title": "Encryption",
+      "type": "object"
+    },
+    "EncryptionAlgorithm": {
+      "description": "Authenticated encryption algorithms accepted for stored evidence.",
+      "enum": [
+        "aes-256-gcm",
+        "chacha20-poly1305"
+      ],
+      "title": "EncryptionAlgorithm",
+      "type": "string"
+    },
+    "EvidenceKind": {
+      "enum": [
+        "cowrie.event",
+        "tty.log",
+        "upload"
+      ],
+      "title": "EvidenceKind",
+      "type": "string"
+    },
+    "InlineContent": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "additionalProperties": true,
+          "title": "Data",
+          "type": "object"
+        },
+        "storage": {
+          "const": "inline",
+          "default": "inline",
+          "title": "Storage",
+          "type": "string"
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "title": "InlineContent",
+      "type": "object"
+    },
+    "StoredContent": {
+      "additionalProperties": false,
+      "description": "Content held outside the record, such as a TTY log or a quarantined file.\n\nAlways encrypted, so nothing that leaves the record is ever stored in the\nclear, whatever it turns out to contain.",
+      "properties": {
+        "encryption": {
+          "$ref": "#/$defs/Encryption"
+        },
+        "storage": {
+          "const": "stored",
+          "default": "stored",
+          "title": "Storage",
+          "type": "string"
+        },
+        "uri": {
+          "minLength": 1,
+          "title": "Uri",
+          "type": "string"
+        }
+      },
+      "required": [
+        "uri",
+        "encryption"
+      ],
+      "title": "StoredContent",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "content": {
+      "discriminator": {
+        "mapping": {
+          "inline": "#/$defs/InlineContent",
+          "stored": "#/$defs/StoredContent"
+        },
+        "propertyName": "storage"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/InlineContent"
+        },
+        {
+          "$ref": "#/$defs/StoredContent"
+        }
+      ],
+      "title": "Content"
+    },
+    "evidence_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._:-]+$",
+      "title": "Evidence Id",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/EvidenceKind"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "received_at": {
+      "format": "date-time",
+      "title": "Received At",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "sensitive": {
+      "default": false,
+      "title": "Sensitive",
+      "type": "boolean"
+    },
+    "sensor_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._:-]+$",
+      "title": "Sensor Id",
+      "type": "string"
+    },
+    "session_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:-]+$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Sha256",
+      "type": "string"
+    },
+    "size_bytes": {
+      "minimum": 0,
+      "title": "Size Bytes",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "evidence_id",
+    "kind",
+    "sensor_id",
+    "observed_at",
+    "received_at",
+    "sha256",
+    "size_bytes",
+    "content"
+  ],
+  "title": "RawEvidence",
+  "type": "object"
+}
