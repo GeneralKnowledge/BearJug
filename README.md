@@ -8,6 +8,14 @@ recorded. They never reach a real machine.
 
 - [Deceptive Access design](docs/design/deceptive-access.md)
 - [Implementation roadmap](docs/roadmap.md)
+- [Canonical event schema](docs/schema.md)
+
+## Development
+
+```
+python -m venv .venv && .venv/bin/pip install -e '.[dev]'
+.venv/bin/pytest
+```
 
 Defining engineering rule: make the deception as convincing as possible to the
 attacker, while making the real infrastructure as inaccessible as possible to
