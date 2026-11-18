@@ -23,11 +23,20 @@
     mode: "0644"
   notify: Restart docker
 
+- name: Docker drop-in directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: [/etc/docker, /etc/systemd/system/docker.service.d]
+
 - name: Docker starts after the BearJug firewall
   ansible.builtin.copy:
     dest: /etc/systemd/system/docker.service.d/10-bearjug.conf
     content: |
-      # {{ ansible_managed }}
+      # Managed by BearJug Ansible (roles/sensor/tasks/docker.yml).
       [Unit]
       Wants=bearjug-firewall.service
       After=bearjug-firewall.service
