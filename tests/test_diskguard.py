@@ -193,6 +193,86 @@ def test_shipper_health_reasons(tmp_path):
     h = tmp_path / "h.json"
     assert shipper_healthy(h, within_seconds=60)[0] is False
     h.write_text("not json")
-    assert shipper_healthy(h, within_seconds=60) == (False, "shipper health file is unreadable")
+    assert shipper_healthy(h, within_seconds=60) == (False, "shipper health file is unreadable: JSONDecodeError")
     write_health(h)
     assert shipper_healthy(h, within_seconds=60)[0] is True
+
+
+# --- review hardening: untrustworthy state and health files ---------------------
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["", "{", "[]", "null", '{"cowrie_stopped": "no"}', '{"other": true}', '{"cowrie_stopped": 1}'],
+)
+def test_corrupt_state_never_restarts_cowrie_unsafely(setup, content):
+    make, volume, commands, config = setup
+    config.state_path.write_text(content)
+    write_health(config.shipper_health)
+    guard = make()  # starts despite the bad file
+    assert guard.uncertain and guard.stopped
+    assert (config.state_path.parent / (config.state_path.name + ".corrupt")).read_text() == content
+    volume.percent = 70  # between resume and stop: no restart while uncertain
+    assert guard.check() == "held"
+    assert "start" not in commands.calls
+
+
+def test_corrupt_state_still_stops_cowrie_at_the_threshold(setup):
+    make, volume, commands, config = setup
+    config.state_path.write_text("garbage")
+    guard = make()
+    volume.percent = 81
+    assert guard.check() == "stopped"
+    assert commands.calls[0] == "stop"  # stopped even though it might already be
+    assert guard.uncertain is False
+    assert json.loads(config.state_path.read_text())["cowrie_stopped"] is True
+
+
+def test_corrupt_state_resumes_only_by_the_safe_rule(setup):
+    make, volume, commands, config = setup
+    config.state_path.write_text("garbage")
+    guard = make()
+    volume.percent = 50
+    assert guard.check() == "held"  # shipper hasn't reported
+    write_health(config.shipper_health)
+    assert guard.check() == "resumed"
+    assert guard.uncertain is False
+    assert json.loads(config.state_path.read_text())["cowrie_stopped"] is False
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "[]",
+        '"ok"',
+        "42",
+        '{"ok": "yes", "checked_at": "2026-11-18T00:00:00+00:00"}',
+        '{"ok": true}',
+        '{"ok": true, "checked_at": 12345}',
+        '{"ok": true, "checked_at": "yesterday"}',
+        '{"ok": true, "checked_at": "2026-11-18T12:00:00"}',
+        '{"ok": true, "checked_at": "2999-01-01T00:00:00+00:00"}',
+        '{"ok": false, "checked_at": "2026-11-18T12:00:00+00:00", "error": ["x"]}',
+    ],
+)
+def test_malformed_health_reports_are_unhealthy_never_errors(tmp_path, content):
+    h = tmp_path / "h.json"
+    h.write_text(content)
+    healthy, reason = shipper_healthy(h, within_seconds=10**9)
+    assert healthy is False and reason
+
+
+def test_health_file_that_is_a_directory_is_unhealthy(tmp_path):
+    (tmp_path / "h.json").mkdir()
+    assert shipper_healthy(tmp_path / "h.json", within_seconds=60)[0] is False
+
+
+def test_guard_keeps_running_with_a_malformed_health_report(setup):
+    make, volume, commands, config = setup
+    guard = make()
+    volume.percent = 90
+    guard.check()
+    config.shipper_health.write_text('{"ok": true, "checked_at": null}')
+    volume.percent = 10
+    assert guard.check() == "held"
+    assert "start" not in commands.calls

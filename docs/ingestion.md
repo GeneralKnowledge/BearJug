@@ -176,6 +176,15 @@ whole evidence filesystem:
 * **Separate filesystem.** The guard refuses to run if the evidence directory
   is on the same filesystem as `/` (`--allow-shared-filesystem` is for local
   testing only), so the evidence volume can never fill the root filesystem.
+* **Unreadable guard state.** If the guard's state file is corrupt or has the
+  wrong shape, the guard still starts. It logs a critical error, keeps the bad
+  file as `<state>.corrupt`, and treats Cowrie's state as unknown. It still
+  stops Cowrie at 80% (even if Cowrie may already be stopped), and it restarts
+  Cowrie only by the normal rule: below 60% with healthy shipping.
+* **Untrustworthy health reports.** Anything other than a well-formed,
+  successful, recent report counts as unhealthy, and never crashes the guard.
+  That covers a missing or unreadable file, the wrong JSON shape, a missing,
+  invalid or zone-less timestamp, and a timestamp in the future.
 * A failed stop or start command is logged and retried on the next check.
   The commands come only from the guard's own arguments, run without a
   shell, and are never built from anything in the spool.

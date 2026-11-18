@@ -57,18 +57,38 @@ def volume_usage_percent(path: Path) -> float:
     return 100.0 * used / usable if usable else 100.0
 
 
+MAX_CLOCK_AHEAD_SECONDS = 60
+
+
 def shipper_healthy(health_file: Path, *, within_seconds: float, now: datetime | None = None) -> tuple[bool, str]:
-    """Whether the shipper's latest pass reached the collector, recently."""
+    """Whether the shipper's latest pass reached the collector, recently.
+
+    Anything that isn't a well-formed, recent, successful report counts as
+    unhealthy: a missing or unreadable file, the wrong JSON shape, a missing
+    or invalid timestamp, a timestamp without a time zone or in the future.
+    This never raises, so a bad report can't crash the guard."""
     try:
         health = json.loads(health_file.read_text())
     except FileNotFoundError:
         return False, "shipper has not reported yet"
+    except (OSError, ValueError) as e:
+        return False, f"shipper health file is unreadable: {type(e).__name__}"
+    if not isinstance(health, dict):
+        return False, "shipper health report is malformed"
+    if health.get("ok") is not True:
+        return False, f"shipper's last pass failed: {str(health.get('error'))[:200]}"
+    checked_raw = health.get("checked_at")
+    if not isinstance(checked_raw, str):
+        return False, "shipper health report has no timestamp"
+    try:
+        checked = datetime.fromisoformat(checked_raw)
     except ValueError:
-        return False, "shipper health file is unreadable"
-    if not health.get("ok"):
-        return False, f"shipper's last pass failed: {health.get('error')}"
-    checked = datetime.fromisoformat(health["checked_at"])
+        return False, "shipper health report has an invalid timestamp"
+    if checked.tzinfo is None or checked.utcoffset() is None:
+        return False, "shipper health report timestamp has no time zone"
     age = ((now or datetime.now(timezone.utc)) - checked).total_seconds()
+    if age < -MAX_CLOCK_AHEAD_SECONDS:
+        return False, "shipper health report is dated in the future"
     if age > within_seconds:
         return False, f"shipper last reported {age:.0f}s ago"
     return True, "shipper reached the collector"
@@ -120,14 +140,39 @@ class DiskGuard:
         self.config = config
         self.usage = usage
         self.runner = runner
+        self.uncertain = False
+        """True when the saved state couldn't be trusted, so whether Cowrie is
+        running is unknown. The guard then stops Cowrie at the stop
+        threshold even if it may already be stopped, and starts it only by
+        the normal resume rule (below resume, shipping healthy)."""
         self.stopped = self._load()
         self.level = "ok"
 
     def _load(self) -> bool:
+        path = self.config.state_path
         try:
-            return bool(json.loads(self.config.state_path.read_text())["cowrie_stopped"])
+            raw = json.loads(path.read_text())
+            if not isinstance(raw, dict) or not isinstance(raw.get("cowrie_stopped"), bool):
+                raise ValueError("unexpected shape")
+            return raw["cowrie_stopped"]
         except FileNotFoundError:
             return False
+        except (OSError, ValueError) as e:
+            # Unknown whether Cowrie is running. Assume it may be stopped, so
+            # nothing restarts it except a safe resume, and keep the bad file
+            # for inspection.
+            log.critical(
+                "disk guard state %s is unreadable (%s); treating Cowrie's state as unknown: it will be stopped at "
+                "the stop threshold and restarted only below the resume threshold with healthy shipping",
+                path,
+                e,
+            )
+            try:
+                os.replace(path, path.with_name(path.name + ".corrupt"))
+            except OSError:
+                pass
+            self.uncertain = True
+            return True
 
     def _save(self) -> None:
         write_private(
@@ -146,10 +191,11 @@ class DiskGuard:
         used = self.usage(c.evidence_dir)
 
         if used >= c.stop_percent:
-            if not self.stopped:
+            if not self.stopped or self.uncertain:
                 log.critical("evidence volume %.1f%% full (stop at %.0f%%): stopping Cowrie", used, c.stop_percent)
                 if self.runner(c.stop_command):
                     self.stopped = True
+                    self.uncertain = False
                     self._save()
                     self._alert(f"BearJug: evidence volume {used:.1f}% full; Cowrie stopped")
                 else:
@@ -167,6 +213,7 @@ class DiskGuard:
             log.warning("evidence volume %.1f%% full and shipping is healthy: starting Cowrie", used)
             if self.runner(c.start_command):
                 self.stopped = False
+                self.uncertain = False
                 self._save()
                 self._alert(f"BearJug: evidence volume {used:.1f}% full; Cowrie restarted")
                 return "resumed"
